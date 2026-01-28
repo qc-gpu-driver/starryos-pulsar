@@ -189,7 +189,7 @@
 <strong>阅读手册与 Demo</strong>
 <ul>
 <li><input disabled="" type="checkbox"/>
-研读 RK3588 TRM (技术参考手册) 中 NPU 章节。</li>
+研读 RK3588 技术参考手册中 NPU 章节。</li>
 <li><input disabled="" type="checkbox"/>
 分析 RKNN Toolkit2 的官方 Demo，理解从模型加载到推理的完整数据流</li>
 </ul>
@@ -198,27 +198,27 @@
 <strong>实体机环境验证</strong> (基于 StarryOS 比赛版)
 <ul>
 <li><input disabled="" type="checkbox"/>
-编译并烧录比赛版本的 NPU 驱动代码到 RK3588 实体板。</li>
+编译并烧录比赛版本的 StarryOS 代码到 RK3588 实体板。</li>
 <li><input disabled="" type="checkbox"/>
 成功运行一个简单的文本生成模型，确保硬件和工具链正常。</li>
 </ul>
 </li>
 <li><input disabled="" type="checkbox"/>
-<strong>整理 StarryOS 对 RK3588 NPU 驱动的逆向成果（交付物）</strong>
+<strong>整理 StarryOS 对 RK3588 NPU 驱动的逆向成果</strong>
 <ul>
 <li><input disabled="" type="checkbox"/>
-<strong>寄存器地图（Register Map）</strong>
+<strong>寄存器地图</strong>
 <ul>
 <li><input disabled="" type="checkbox"/>
 按模块梳理：PC / INT / CORE / CNA / DPU / PPU / SDMA / DDMA / GLOBAL</li>
 <li><input disabled="" type="checkbox"/>
-对每个寄存器记录：offset、字段含义、读写属性、默认值/复位值（如可得）、关联流程</li>
+对每个寄存器记录：offset、字段含义、读写属性、默认值/复位值、关联流程</li>
 <li><input disabled="" type="checkbox"/>
 标注来源：TRM / Linux rknpu 驱动</li>
 </ul>
 </li>
 <li><input disabled="" type="checkbox"/>
-<strong>提交协议与数据结构（ABI/Protocol）</strong>
+<strong>提交协议与数据结构</strong>
 <ul>
 <li><input disabled="" type="checkbox"/>
 整理 <code>DRM_IOCTL_RKNPU_*</code> ioctl 列表与语义（Action / MemCreate / MemMap / MemDestroy / MemSync / Submit）</li>
@@ -232,9 +232,9 @@
 <strong>任务提交流程（时序 + 状态机）</strong>
 <ul>
 <li><input disabled="" type="checkbox"/>
-从“用户态提交”到“硬件执行完成”的完整时序（含缓存一致性点：to-device/from-device）</li>
+从“用户态提交”到“硬件执行完成”的完整时序</li>
 <li><input disabled="" type="checkbox"/>
-失败路径：超时、异常中断状态、非法参数（应返回什么错误）</li>
+失败路径：超时、异常中断状态、非法参数</li>
 </ul>
 </li>
 </ul>
@@ -277,7 +277,7 @@
 </ul>
 </li>
 </ul>
-<h3 id="3-用户态接口适配-vfs--drm"><a class="header" href="#3-用户态接口适配-vfs--drm">3. 用户态接口适配 (VFS &amp; DRM)</a></h3>
+<h3 id="3-用户态接口适配-drm"><a class="header" href="#3-用户态接口适配-drm">3. 用户态接口适配 (DRM)</a></h3>
 <ul>
 <li><input disabled="" type="checkbox"/>
 <strong>DRM 框架（StarryOS 主线）</strong>
