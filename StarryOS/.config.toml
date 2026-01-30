@@ -1,4 +1,0 @@
-[system.Custom]
-build_cmd = "make aarch64-build LOG=info"
-elf_path = "StarryOS_aarch64-dyn.elf"
-to_bin = true

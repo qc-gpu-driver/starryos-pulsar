@@ -1,58 +1,134 @@
-# [基于国产 AI 芯片的 Rust 内核组件开发赛](https://competition.atomgit.com/competitionInfo?id=7f4ba773dfa6396f824a3074192ebcde#heading-0-0)
+# Starry OS
 
-## 目录
+*An experimental monolithic OS based on ArceOS*
 
-```
-.
-├── imgs
-├── demo                    # NPU相关的应用示例源码
-│   ├── npu_benchmark       # benchmark 测试程序源码
-│   ├── npu_llama           # LLAMA 测试程序源码
-│   └── yolov8              # Yolo v8 模型源码
-├── deploy                  # 部署工具及镜像
-│   ├── config              # 烧写配置文件
-│   ├── images              # 磁盘（根文件系统）镜像
-│   ├── loader              # 引导程序镜像
-│   └── RKDevTool_v3.37     # 镜像烧写工具
-├── axcpu                   # 扩展完善后的 axcpu 组件
-├── axplat-aarch64-dyn      # 动态平台适配层
-├── drivers                 # 为适配香橙派而实现的驱动源码
-│   ├── arm-scmi            # 时钟驱动源码
-│   ├── rk3588-clk          # 时钟驱动源码
-│   ├── rknpu               # NPU 驱动源码
-│   ├── rockchip-pm         # 电源驱动源码
-│   ├── sdmmc               # 存储驱动源码
-│   └── some-serial         # 串口驱动源码
-├── rdrive                  # Rust 动态驱动框架
-├── ostool                  # 为了方便在开发板上调试而开发的辅助调试工具源码
-├── StarryOS                # 适配后的香橙派上可运行的 StarryOS 源码
-├── license
-├── README.md
-├── 决赛-技术报告.md
-├── 决赛-源代码.md
-└── 初赛-文档.md
+[![GitHub Stars](https://img.shields.io/github/stars/Starry-OS/StarryOS?style=for-the-badge)](https://github.com/Starry-OS/StarryOS/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/Starry-OS/StarryOS?style=for-the-badge)](https://github.com/Starry-OS/StarryOS/network)
+[![GitHub License](https://img.shields.io/github/license/Starry-OS/StarryOS?style=for-the-badge)](https://github.com/Starry-OS/StarryOS/blob/main/LICENSE)
+[![Build status](https://img.shields.io/github/check-runs/Starry-OS/StarryOS/main?style=for-the-badge)](https://github.com/Starry-OS/StarryOS/actions)
+
+## Supported Architectures
+
+- [x] RISC-V 64
+- [x] LoongArch64
+- [x] AArch64
+- [ ] x86_64 (work in progress)
+
+## Features
+
+TODO
+
+## Quick Start
+
+### 1. Clone repo
+
+```bash
+git clone --recursive https://github.com/Starry-OS/StarryOS.git
+cd StarryOS
 ```
 
-## 文档
+Or if you have already cloned it without `--recursive` option:
 
-- [初赛文档](./初赛-文档.md) - 项目初期方案设计
+```bash
+cd StarryOS
+git submodule update --init --recursive
+```
 
-- [决赛技术报告](./决赛-技术报告.md) - 完整技术实现报告
+### 2. Install Prerequisites
 
-- 演示视频 - 仓库中无法直接播放视频，下载仓库后详见 `./imgs` 目录下的 `*.mp4` 文件
+#### A. Using Docker
 
-## 性能测试
+We provide a prebuilt Docker image with all dependencies installed.
 
-演示视频参见 `imgs\perf.mp4`，执行结果如下：
+For users in mainland China, you can use the following image which includes optimizations like Debian packages mirrors and crates.io mirrors:
 
-<img src="./imgs/perf.png" width="50%" height="50%">
+```bash
+docker pull docker.cnb.cool/starry-os/arceos-build
+docker run -it --rm -v $(pwd):/workspace -w /workspace docker.cnb.cool/starry-os/arceos-build
+```
 
-## 功能测试
+For other users, you can use the image hosted on GitHub Container Registry:
 
-演示视频参见 `imgs/llama.mp4`，执行结果如下：
+```bash
+docker pull ghcr.io/arceos-org/arceos-build
+docker run -it --rm -v $(pwd):/workspace -w /workspace ghcr.io/arceos-org/arceos-build
+```
 
-<img src="./imgs/llama.png" width="50%" height="50%">
+**Note:** The `--rm` flag will destroy the container instance upon exit. Any changes made inside the container (outside of the mounted `/workspace` volume) will be lost. Please refer to the [Docker documentation](https://docs.docker.com/) for more advanced usage.
 
-演示视频参见 `imgs/yolov8.mp4`，执行结果如下：
+#### B. Manual Setup
 
-<img src="./imgs/yolov8_result.png" width="50%" height="50%">
+##### i. Install System Dependencies
+
+This step may vary depending on your operating system. Here is an example based on Debian:
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake clang qemu-system
+```
+
+**Note:** Running on LoongArch64 requires QEMU 10. If the QEMU version in your Linux distribution is too old (e.g. Ubuntu), consider building QEMU from [source](https://www.qemu.org/download/).
+
+##### ii. Install Musl Toolchain
+
+1. Download files from [setup-musl releases](https://github.com/arceos-org/setup-musl/releases/tag/prebuilt)
+2. Extract to some path, for example `/opt/riscv64-linux-musl-cross`
+3. Add bin folder to `PATH`, for example:
+
+   ```bash
+   export PATH=/opt/riscv64-linux-musl-cross/bin:$PATH
+   ```
+
+##### iii. Setup Rust toolchain
+
+```bash
+# Install rustup from https://rustup.rs or using your system package manager
+
+# Automatically download components via rustup
+cd StarryOS
+cargo -V
+```
+
+### 3. Prepare rootfs
+
+```bash
+# Default target: riscv64
+make rootfs
+# Explicit target
+make ARCH=riscv64 rootfs
+make ARCH=loongarch64 rootfs
+```
+
+This will download rootfs image from [Starry-OS/rootfs](https://github.com/Starry-OS/rootfs/releases) and set up the disk file for running on QEMU.
+
+### 4. Build and run on QEMU
+
+```bash
+# Default target: riscv64
+make build
+# Explicit target
+make ARCH=riscv64 build
+make ARCH=loongarch64 build
+
+# Run on QEMU (also rebuilds if necessary)
+make ARCH=riscv64 run
+make ARCH=loongarch64 run
+```
+
+Note:
+
+1. Binary dependencies will be automatically built during `make build`.
+2. You don't have to rerun `build` every time. `run` automatically rebuilds if necessary.
+3. The disk file will **not** be reset between each run. As a result, if you want to switch to another architecture, you must run `make rootfs` with the new architecture before `make run`.
+
+## What next?
+
+You can check out the [GUI guide](./docs/x11.md) to set up a graphical environment, or explore other documentation in this folder.
+
+If you're interested in contributing to the project, please see our [Contributing Guide](./CONTRIBUTING.md).
+
+See more build options in the [Makefile](./Makefile).
+
+## License
+
+This project is now released under the Apache License 2.0. All modifications and new contributions in our project are distributed under the same license. See the [LICENSE](./LICENSE) and [NOTICE](./NOTICE) files for details.
