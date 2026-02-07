@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-7eed6f28.js";
+            window.path_to_searchindex_js = "searchindex-be72a116.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-115ea86d.js"></script>
+        <script src="toc-cbe36b10.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -180,8 +180,8 @@
 <h1 id="rk3588-npu-驱动开发路线图"><a class="header" href="#rk3588-npu-驱动开发路线图">RK3588 NPU 驱动开发路线图</a></h1>
 <h2 id="进度总览"><a class="header" href="#进度总览">进度总览</a></h2>
 <blockquote>
-<p><strong>当前状态</strong>：阅读手册与 Demo
-<strong>目标</strong>：分析和研读 RK3588 NPU 的手册与 Demo，为后续开发打下基础。</p>
+<p><strong>当前状态</strong>：电源域管理 (Power Domain)
+<strong>目标</strong>：将添加了npu驱动的starry编译拷贝到开发板验证探测</p>
 </blockquote>
 <h2 id="实际计划"><a class="header" href="#实际计划">实际计划</a></h2>
 <h2 id="第一周环境验证与基础初始化"><a class="header" href="#第一周环境验证与基础初始化">第一周：环境验证与基础初始化</a></h2>
@@ -232,9 +232,9 @@
 <li><input disabled="" type="checkbox" checked=""> 配置 <code>Cargo.toml</code> 依赖。</li>
 </ul>
 </li>
-<li><input disabled="" type="checkbox"> <strong>NPU探测</strong>
+<li><input disabled="" type="checkbox" checked=""> <strong>NPU探测</strong>
 <ul>
-<li><input disabled="" type="checkbox"> 实现 FDT (设备树) 解析，获取 NPU 寄存器基地址和中断号。</li>
+<li><input disabled="" type="checkbox" checked=""> 实现 FDT (设备树) 解析，获取 NPU 寄存器基地址和中断号。</li>
 </ul>
 </li>
 <li><input disabled="" type="checkbox"> <strong>电源域管理 (Power Domain)</strong>
@@ -254,9 +254,9 @@
 <ul>
 <li><input disabled="" type="checkbox"> <strong>DRM 框架（StarryOS 主线）</strong>
 <ul>
-<li><input disabled="" type="checkbox"> <strong>DRM ioctl 基础解析</strong>
+<li><input disabled="" type="checkbox" checked=""> <strong>DRM ioctl 基础解析</strong>
 <ul>
-<li><input disabled="" type="checkbox"> 实现 ioctl 编码解析：<code>ioctl_nr</code> / <code>is_driver_ioctl</code> / <code>io_size</code></li>
+<li><input disabled="" type="checkbox" checked=""> 实现 ioctl 编码解析：<code>ioctl_nr</code> / <code>is_driver_ioctl</code> / <code>io_size</code></li>
 </ul>
 </li>
 <li><input disabled="" type="checkbox"> <strong>设备节点与基础握手</strong>
@@ -332,6 +332,105 @@
 <li><input disabled="" type="checkbox"> <strong>多核调度策略</strong>：如何分配任务给 3 个 NPU 核心。</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="项目周报"><a class="header" href="#项目周报">项目周报</a></h1>
+<p>按周记录 RKNN NPU 驱动开发进展。</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="第一周开发日志125-131"><a class="header" href="#第一周开发日志125-131">第一周开发日志（1.25-1.31）</a></h1>
+<h2 id="工作总结"><a class="header" href="#工作总结">工作总结</a></h2>
+<ul>
+<li><strong>基础知识学习</strong> — 学习 NPU 原理、AI 模型运行原理、驱动在整个推理链条中的角色</li>
+<li><strong>RKNN Toolkit2 仿真验证</strong> — 下载套件，阅读 demo 代码，在 x86 仿真器上跑通测例</li>
+</ul>
+<hr>
+<h2 id="基础知识学习"><a class="header" href="#基础知识学习">基础知识学习</a></h2>
+<p>刚接到 NPU 驱动开发任务时，虽然听说过 NPU，但对它实际是什么、解决什么问题、工作原理、如何运行都不了解。花了一天时间系统学习了以下内容：</p>
+<ul>
+<li><strong>NPU 是什么</strong> — 神经网络处理单元，专为矩阵运算和推理加速设计的硬件</li>
+<li><strong>AI 模型的本质</strong> — 本质上是一个函数，是大量矩阵乘法配上激活函数。训练是拟合参数，推理是执行前向传播</li>
+<li><strong>模型格式与转换</strong> — ONNX → RKNN 格式转换，量化，以及模型在 NPU 上的执行流程</li>
+<li><strong>驱动在整个链条中的角色</strong> — 用户态库（<code>librknnrt.so</code>）通过 ioctl 与内核驱动通信，驱动负责任务调度、DMA 搬运、寄存器操作</li>
+</ul>
+<hr>
+<h2 id="rknn-toolkit2-套件与仿真验证"><a class="header" href="#rknn-toolkit2-套件与仿真验证">RKNN Toolkit2 套件与仿真验证</a></h2>
+<p>上 Rockchip 官网下载了 <a href="https://github.com/airockchip/rknn-toolkit2">rknn-toolkit2</a> 套件，发现里面包含一个 <strong>仿真器</strong>，可以在 x86 主机上模拟 RKNPU 的部分功能。阅读了 demo 代码，理解了 RKNN 推理的基本 API 调用流程：</p>
+<pre><code>rknn_init()来初始化npu执行上下文 → rknn_inputs_set()读写npu寄存器设置输出输出参数 → rknn_run()写npu寄存器提醒npu开始工作和运行 → rknn_outputs_get()npu通过中断通知操作系统，用户库从约定位置读取结果 → rknn_destroy()销毁释放npu执行上下文
+</code></pre>
+<hr><div style="break-before: page; page-break-before: always;"></div>
+<h1 id="第二周开发日志21-27"><a class="header" href="#第二周开发日志21-27">第二周开发日志（2.1-2.7）</a></h1>
+<h2 id="工作总结-1"><a class="header" href="#工作总结-1">工作总结</a></h2>
+<ul>
+<li><strong>开发板验证通过</strong> — 在 OrangePi 5 Plus（RK3588）上部署 StarryOS（NPU 版本），成功跑通 RKNN 推理测例</li>
+<li><strong>闭源库逆向文档整理</strong> — 整理了 <code>librknnrt.so</code> 逆向成果、完整寄存器语义、模型推理全链条，发布至 <a href="https://qc-gpu-driver.github.io/starryos-pulsar/documents/docs.html">GitHub Pages</a></li>
+<li><strong>驱动骨架搭建</strong> — 创建 <code>axnpu-rknn</code> 独立 crate，编写 DTB 设备探测代码，通过 <code>rdrive</code> 框架自动匹配 NPU 设备</li>
+<li><strong>DRM 框架初步实现</strong> — 创建 <code>axdrm</code> crate，实现 GEM 内存对象管理和 ioctl 编码解析与分发机制</li>
+</ul>
+<hr>
+<h2 id="开发板验证"><a class="header" href="#开发板验证">开发板验证</a></h2>
+<p>搭载 RK3588 芯片的 <strong>OrangePi 5 Plus</strong> 开发板到了之后，将带有 NPU 支持的 StarryOS 版本（<a href="https://atomgit.com/aios-porting/3906cf9f2ccbf898bd3512d5862ef92e">atomgit 仓库</a>）部署到开发板上，<strong>成功跑通测例</strong>，验证了 NPU 驱动在 StarryOS 上的可行性。</p>
+<hr>
+<h2 id="闭源库逆向与文档整理"><a class="header" href="#闭源库逆向与文档整理">闭源库逆向与文档整理</a></h2>
+<p>花了 3 天时间系统整理了以下内容：</p>
+<ul>
+<li><strong><code>librknnrt.so</code> 闭源库逆向成果</strong> — 梳理了用户态库的内部调用流程、ioctl 命令、内存管理机制</li>
+<li><strong>寄存器语义</strong> — 从官方 TRM 手册和 <a href="https://github.com/rockchip-linux/kernel">RKNN 开源内核驱动</a>（C 语言版本）中，整理了完整的寄存器描述和语义</li>
+<li><strong>模型推理全链条</strong> — 从 <code>rknn_init</code> 到 <code>rknn_destroy</code> 的完整生命周期，包括任务提交流程、状态机、DMA Fence 路径等</li>
+</ul>
+<blockquote>
+<p><strong>文档链接</strong>：<a href="https://qc-gpu-driver.github.io/starryos-pulsar/documents/docs.html">https://qc-gpu-driver.github.io/starryos-pulsar/documents/docs.html</a></p>
+</blockquote>
+<p>这份文档不仅方便自己开发时查阅，也相当于一份<strong>社区参考文档</strong>，我也会一直维护和验证的，方便更多对 RKNN NPU 驱动感兴趣的开发者查阅和使用。</p>
+<hr>
+<h2 id="驱动骨架编写"><a class="header" href="#驱动骨架编写">驱动骨架编写</a></h2>
+<p>最初尝试直接在 <code>arceos/modules/</code> 下创建 <code>axnpu-rknn</code> 驱动模块，但遇到了 <strong>workspace 循环依赖问题</strong>——ArceOS 的 <code>axdriver_block</code> 锁定的版本缺少 <code>ahci</code> feature，而 Cargo workspace 会全量解析所有 members 的依赖，导致整个 workspace 编译失败。</p>
+<p>参考 StarryOS（NPU 版本）的做法，将驱动模块移动到 Starry 根目录下独立开发，等完善后再集成回 arceos。</p>
+<p>编写了 <code>dtbparse.rs</code>，利用 ArceOS 的 <code>rdrive</code> 框架通过设备树（DTB）自动探测 NPU 设备：</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>module_driver! {
+    name: "RKNPU",
+    level: ProbeLevel::PostKernel,
+    priority: ProbePriority::DEFAULT,
+    probe_kinds: &amp;[
+        ProbeKind::Fdt {
+            compatibles: &amp;["rockchip,rk3588-rknn"],
+            on_probe: probe_rknpu
+        }
+    ],
+}
+
+fn probe_rknpu(info: FdtInfo&lt;'_&gt;, dev: PlatformDevice) -&gt; Result&lt;(), OnProbeError&gt; {
+    let name = info.node.name();
+    // 提取 MMIO 基址: 0xfdab0000, 大小: 0x9000
+    let mut regs = info.node.reg().ok_or_else(|| { /* ... */ })?;
+    let base_reg = regs.next().ok_or_else(|| { /* ... */ })?;
+    let mmio_base = base_reg.address as usize;
+    let mmio_size = base_reg.size.unwrap_or(0x9000);
+    // 提取中断号: SPI 110, 111, 112（3 个 NPU 核心）
+    // ...
+    Ok(())
+}
+<span class="boring">}</span></code></pre>
+<p><code>module_driver!</code> 宏会将驱动自动注册到 <code>rdrive</code> 框架，内核启动时遍历 DTB，匹配 <code>compatible = "rockchip,rk3588-rknn"</code> 后自动调用 <code>probe_rknpu</code>，无需手动调用。</p>
+<hr>
+<h2 id="drm-框架搭建"><a class="header" href="#drm-框架搭建">DRM 框架搭建</a></h2>
+<p>创建了 <code>driver/axdrm</code> crate，作为用户态接口适配层：</p>
+<p><strong>GEM 内存对象管理</strong> — 实现了 <code>GemNumberAllocator</code>（handle 编号分配/回收）、<code>GemObject</code>（物理地址、虚拟地址、fake offset）、<code>GemHandle</code>（自动回收的 RAII handle）</p>
+<p><strong>ioctl 编码解析</strong> — 实现了 DRM ioctl 命令的解码函数：</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>函数</th><th>作用</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ioctl_nr(cmd)</code></td><td>提取 ioctl 编号（bits [7:0]）</td></tr>
+<tr><td><code>ioctl_type(cmd)</code></td><td>提取类型字节（DRM = <code>'d'</code> = 0x64）</td></tr>
+<tr><td><code>ioctl_size(cmd)</code></td><td>提取参数大小（bits [29:16]）</td></tr>
+<tr><td><code>is_driver_ioctl(cmd)</code></td><td>判断是否为驱动私有命令（nr &gt;= 0x40）</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>ioctl 分发机制</strong> — 驱动通过 <code>register_driver()</code> 注册自己的 ioctl handler，<code>dispatch_ioctl()</code> 根据命令编号自动分发到对应驱动。NPU 驱动只需注册一个回调函数即可处理私有 ioctl。</p>
+<hr><div style="break-before: page; page-break-before: always;"></div>
 <h1 id="rk3588-rknpu-开发文档"><a class="header" href="#rk3588-rknpu-开发文档">RK3588 RKNPU 开发文档</a></h1>
 <p>本文档基于 RockChip官方开源仓库和 StarryOS 仓库中对 RK3588 NPU 运行时库（闭源 <code>librknnrt.so</code>）及内核侧 RKNPU DRM 驱动的逆向与复现成果，整理为三个核心章节：</p>
 <h2 id="文档结构"><a class="header" href="#文档结构">文档结构</a></h2>
@@ -3630,7 +3729,7 @@
 <hr>
 <h2 id="4-mmap-规则handle--offset-编码"><a class="header" href="#4-mmap-规则handle--offset-编码">4. mmap 规则（handle → offset 编码）</a></h2>
 <h3 id="41-流程"><a class="header" href="#41-流程">4.1 流程</a></h3>
-<pre class="mermaid">sequenceDiagram
+<pre><code class="language-mermaid">sequenceDiagram
     participant U as 用户态
     participant K as 内核驱动
 
@@ -3650,8 +3749,7 @@
 
     U-&gt;&gt;K: ioctl(MEM_DESTROY, {handle, obj_addr})
     Note over K: 释放 GEM 对象 + DMA 内存
-</pre>
-
+</code></pre>
 <h3 id="42-offset-编码约定"><a class="header" href="#42-offset-编码约定">4.2 offset 编码约定</a></h3>
 <p><span style="background:#e8f5e9;padding:1px 4px;border-radius:3px;font-size:0.8em">Linux rknpu 驱动</span> 中，<code>MEM_MAP</code> 返回的 <code>offset</code> 是 DRM GEM 的 <strong>fake offset</strong>：</p>
 <ul>
@@ -4685,7 +4783,7 @@ rknn_run(ctx, &amp;extend);
 └── ioctl(DRM_IOCTL_RKNPU_SUBMIT, &amp;submit)
 </code></pre>
 <h4 id="422-内核驱动侧任务提交完整时序"><a class="header" href="#422-内核驱动侧任务提交完整时序">4.2.2 内核驱动侧：任务提交完整时序</a></h4>
-<pre class="mermaid">sequenceDiagram
+<pre><code class="language-mermaid">sequenceDiagram
     participant U as 用户态 (librknnrt.so)
     participant S as sys_ioctl
     participant D as DeviceOps::ioctl
@@ -4740,10 +4838,9 @@ rknn_run(ctx, &amp;extend);
     I--&gt;&gt;D: 返回结果
     D--&gt;&gt;S: Ok / Err
     S--&gt;&gt;U: ioctl 返回值
-</pre>
-
+</code></pre>
 <h4 id="423-状态机"><a class="header" href="#423-状态机">4.2.3 状态机</a></h4>
-<pre class="mermaid">stateDiagram-v2
+<pre><code class="language-mermaid">stateDiagram-v2
     [*] --&gt; IDLE: 驱动初始化完成
 
     IDLE --&gt; PARSING: 收到 SUBMIT ioctl
@@ -4772,8 +4869,7 @@ rknn_run(ctx, &amp;extend);
 
     TIMEOUT --&gt; ERROR: 返回超时错误
     ERROR --&gt; IDLE: 错误恢复
-</pre>
-
+</code></pre>
 <h4 id="424-解析-subcore_task5"><a class="header" href="#424-解析-subcore_task5">4.2.4 解析 <code>subcore_task[5]</code></a></h4>
 <p><code>rknpu_submit</code> 包含 <code>subcore_task[5]</code>，每个元素描述一个子核心要执行的 task 切片：</p>
 <pre><code>subcore_task[0]: { task_start: 0,  task_number: 10 }  → core 0 执行 task 0~9

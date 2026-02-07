@@ -35,10 +35,10 @@
             const path_to_root = "../../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../../searchindex-7eed6f28.js";
+            window.path_to_searchindex_js = "../../searchindex-be72a116.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../../toc-115ea86d.js"></script>
+        <script src="../../toc-cbe36b10.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -356,7 +356,7 @@ rknn_run(ctx, &amp;extend);
 └── ioctl(DRM_IOCTL_RKNPU_SUBMIT, &amp;submit)
 </code></pre>
 <h4 id="422-内核驱动侧任务提交完整时序"><a class="header" href="#422-内核驱动侧任务提交完整时序">4.2.2 内核驱动侧：任务提交完整时序</a></h4>
-<pre class="mermaid">sequenceDiagram
+<pre><code class="language-mermaid">sequenceDiagram
     participant U as 用户态 (librknnrt.so)
     participant S as sys_ioctl
     participant D as DeviceOps::ioctl
@@ -411,10 +411,9 @@ rknn_run(ctx, &amp;extend);
     I--&gt;&gt;D: 返回结果
     D--&gt;&gt;S: Ok / Err
     S--&gt;&gt;U: ioctl 返回值
-</pre>
-
+</code></pre>
 <h4 id="423-状态机"><a class="header" href="#423-状态机">4.2.3 状态机</a></h4>
-<pre class="mermaid">stateDiagram-v2
+<pre><code class="language-mermaid">stateDiagram-v2
     [*] --&gt; IDLE: 驱动初始化完成
 
     IDLE --&gt; PARSING: 收到 SUBMIT ioctl
@@ -443,8 +442,7 @@ rknn_run(ctx, &amp;extend);
 
     TIMEOUT --&gt; ERROR: 返回超时错误
     ERROR --&gt; IDLE: 错误恢复
-</pre>
-
+</code></pre>
 <h4 id="424-解析-subcore_task5"><a class="header" href="#424-解析-subcore_task5">4.2.4 解析 <code>subcore_task[5]</code></a></h4>
 <p><code>rknpu_submit</code> 包含 <code>subcore_task[5]</code>，每个元素描述一个子核心要执行的 task 切片：</p>
 <pre><code>subcore_task[0]: { task_start: 0,  task_number: 10 }  → core 0 执行 task 0~9

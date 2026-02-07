@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-7eed6f28.js";
+            window.path_to_searchindex_js = "../searchindex-be72a116.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-115ea86d.js"></script>
+        <script src="../toc-cbe36b10.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -547,7 +547,7 @@
 <hr>
 <h2 id="4-mmap-规则handle--offset-编码"><a class="header" href="#4-mmap-规则handle--offset-编码">4. mmap 规则（handle → offset 编码）</a></h2>
 <h3 id="41-流程"><a class="header" href="#41-流程">4.1 流程</a></h3>
-<pre class="mermaid">sequenceDiagram
+<pre><code class="language-mermaid">sequenceDiagram
     participant U as 用户态
     participant K as 内核驱动
 
@@ -567,8 +567,7 @@
 
     U-&gt;&gt;K: ioctl(MEM_DESTROY, {handle, obj_addr})
     Note over K: 释放 GEM 对象 + DMA 内存
-</pre>
-
+</code></pre>
 <h3 id="42-offset-编码约定"><a class="header" href="#42-offset-编码约定">4.2 offset 编码约定</a></h3>
 <p><span style="background:#e8f5e9;padding:1px 4px;border-radius:3px;font-size:0.8em">Linux rknpu 驱动</span> 中，<code>MEM_MAP</code> 返回的 <code>offset</code> 是 DRM GEM 的 <strong>fake offset</strong>：</p>
 <ul>

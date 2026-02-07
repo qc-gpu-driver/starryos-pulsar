@@ -45,8 +45,8 @@
 ### 3. 用户态接口适配 (DRM)
 
 - [ ] **DRM 框架（StarryOS 主线）**
-    - [ ] **DRM ioctl 基础解析**
-        - [ ] 实现 ioctl 编码解析：`ioctl_nr` / `is_driver_ioctl` / `io_size`
+    - [x] **DRM ioctl 基础解析**
+        - [x] 实现 ioctl 编码解析：`ioctl_nr` / `is_driver_ioctl` / `io_size`
     - [ ] **设备节点与基础握手**
         - [ ] `/dev/dri/card0`：实现 `DRM_IOCTL_VERSION`，返回 Rockchip 相关信息以通过初始化探测
         - [ ] `/dev/dri/card1`：实现 `DRM_IOCTL_VERSION`，driver name 为 `rknpu`

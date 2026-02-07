@@ -35,10 +35,10 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-7eed6f28.js";
+            window.path_to_searchindex_js = "../searchindex-be72a116.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-115ea86d.js"></script>
+        <script src="../toc-cbe36b10.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -177,8 +177,8 @@
                         <h1 id="rk3588-npu-驱动开发路线图"><a class="header" href="#rk3588-npu-驱动开发路线图">RK3588 NPU 驱动开发路线图</a></h1>
 <h2 id="进度总览"><a class="header" href="#进度总览">进度总览</a></h2>
 <blockquote>
-<p><strong>当前状态</strong>：阅读手册与 Demo
-<strong>目标</strong>：分析和研读 RK3588 NPU 的手册与 Demo，为后续开发打下基础。</p>
+<p><strong>当前状态</strong>：电源域管理 (Power Domain)
+<strong>目标</strong>：将添加了npu驱动的starry编译拷贝到开发板验证探测</p>
 </blockquote>
 <h2 id="实际计划"><a class="header" href="#实际计划">实际计划</a></h2>
 <h2 id="第一周环境验证与基础初始化"><a class="header" href="#第一周环境验证与基础初始化">第一周：环境验证与基础初始化</a></h2>
@@ -229,9 +229,9 @@
 <li><input disabled="" type="checkbox" checked=""> 配置 <code>Cargo.toml</code> 依赖。</li>
 </ul>
 </li>
-<li><input disabled="" type="checkbox"> <strong>NPU探测</strong>
+<li><input disabled="" type="checkbox" checked=""> <strong>NPU探测</strong>
 <ul>
-<li><input disabled="" type="checkbox"> 实现 FDT (设备树) 解析，获取 NPU 寄存器基地址和中断号。</li>
+<li><input disabled="" type="checkbox" checked=""> 实现 FDT (设备树) 解析，获取 NPU 寄存器基地址和中断号。</li>
 </ul>
 </li>
 <li><input disabled="" type="checkbox"> <strong>电源域管理 (Power Domain)</strong>
@@ -251,9 +251,9 @@
 <ul>
 <li><input disabled="" type="checkbox"> <strong>DRM 框架（StarryOS 主线）</strong>
 <ul>
-<li><input disabled="" type="checkbox"> <strong>DRM ioctl 基础解析</strong>
+<li><input disabled="" type="checkbox" checked=""> <strong>DRM ioctl 基础解析</strong>
 <ul>
-<li><input disabled="" type="checkbox"> 实现 ioctl 编码解析：<code>ioctl_nr</code> / <code>is_driver_ioctl</code> / <code>io_size</code></li>
+<li><input disabled="" type="checkbox" checked=""> 实现 ioctl 编码解析：<code>ioctl_nr</code> / <code>is_driver_ioctl</code> / <code>io_size</code></li>
 </ul>
 </li>
 <li><input disabled="" type="checkbox"> <strong>设备节点与基础握手</strong>
@@ -337,7 +337,7 @@
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../documents/docs.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../develop_log/index.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -351,7 +351,7 @@
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../documents/docs.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../develop_log/index.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
