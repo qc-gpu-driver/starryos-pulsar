@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 rdrive = "0.18"
 log = "0.4"
+axdrm = { path = "../axdrm" }

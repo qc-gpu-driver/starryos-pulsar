@@ -365,6 +365,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "axdrm"
+version = "0.1.0"
+dependencies = [
+ "lazy_static",
+ "spin 0.10.0",
+]
+
+[[package]]
 name = "axerrno"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -551,6 +559,7 @@ dependencies = [
 name = "axnpu-rknn"
 version = "0.1.0"
 dependencies = [
+ "axdrm",
  "log",
  "rdrive",
 ]
