@@ -1,8 +1,8 @@
 # RK3588 NPU 驱动开发路线图
 
 ## 进度总览
-> **当前状态**：阅读手册与 Demo
-> **目标**：分析和研读 RK3588 NPU 的手册与 Demo，为后续开发打下基础。
+> **当前状态**：电源域管理 (Power Domain)
+> **目标**：将添加了npu驱动的starry编译拷贝到开发板验证探测
 
 ## 实际计划
 
@@ -15,26 +15,26 @@
 - [x] **实体机环境验证** (基于 StarryOS 比赛版)
     - [x] 编译并烧录比赛版本的 StarryOS 代码到 RK3588 实体板。
     - [x] 成功运行一个简单的文本生成模型，确保硬件和工具链正常。
-- [ ] **整理 StarryOS 对 RK3588 NPU 驱动的逆向成果**
-    - [ ] **寄存器地图**
-        - [ ] 按模块梳理：PC / INT / CORE / CNA / DPU / PPU / SDMA / DDMA / GLOBAL
-        - [ ] 对每个寄存器记录：offset、字段含义、读写属性、默认值/复位值、关联流程
-        - [ ] 标注来源：TRM / Linux rknpu 驱动
-    - [ ] **提交协议与数据结构**
-        - [ ] 整理 `DRM_IOCTL_RKNPU_*` ioctl 列表与语义（Action / MemCreate / MemMap / MemDestroy / MemSync / Submit）
-        - [ ] 对齐结构体布局：`rknpu_mem_create` / `rknpu_mem_map` / `rknpu_task` / `rknpu_submit`（字段意义与对齐）
-        - [ ] 梳理 `mmap(offset)` 规则（handle 与 offset 的编码/解码约定）
-    - [ ] **任务提交流程（时序 + 状态机）**
-        - [ ] 从“用户态提交”到“硬件执行完成”的完整时序
-        - [ ] 失败路径：超时、异常中断状态、非法参数
+- [x] **整理 StarryOS 对 RK3588 NPU 驱动的逆向成果**
+    - [x] **寄存器地图**
+        - [x] 按模块梳理：PC / CORE / CNA / DPU / PPU / SDMA / DDMA / GLOBAL
+        - [x] 对每个寄存器记录：offset、字段含义、读写属性、默认值/复位值、关联流程
+        - [x] 标注来源：TRM / Linux rknpu 驱动
+    - [x] **提交协议与数据结构**
+        - [x] 整理 `DRM_IOCTL_RKNPU_*` ioctl 列表与语义（Action / MemCreate / MemMap / MemDestroy / MemSync / Submit）
+        - [x] 对齐结构体布局：`rknpu_mem_create` / `rknpu_mem_map` / `rknpu_task` / `rknpu_submit`（字段意义与对齐）
+        - [x] 梳理 `mmap(offset)` 规则（handle 与 offset 的编码/解码约定）
+    - [x] **任务提交流程（时序 + 状态机）**
+        - [x] 从“用户态提交”到“硬件执行完成”的完整时序
+        - [x] 失败路径：超时、异常中断状态、非法参数
 
 
 ### 2. 驱动框架搭建 (在StarryOS主线上完成)
-- [ ] **创建模块骨架**
-    - [ ] 在StarryOS组织的`arceos` 仓库中创建 `rknpu` 独立模块。
-    - [ ] 配置 `Cargo.toml` 依赖。
-- [ ] **NPU探测**
-    - [ ] 实现 FDT (设备树) 解析，获取 NPU 寄存器基地址和中断号。
+- [x] **创建模块骨架**
+    - [x] 在StarryOS组织的`arceos` 仓库中创建 `rknpu` 独立模块。
+    - [x] 配置 `Cargo.toml` 依赖。
+- [x] **NPU探测**
+    - [x] 实现 FDT (设备树) 解析，获取 NPU 寄存器基地址和中断号。
 - [ ] **电源域管理 (Power Domain)**
     - [ ] 对接 PMU 驱动，按顺序开启 NPU 电源域：
         - [ ] `NPUTOP`

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["api", "core"]
+members = ["api", "core", "driver/axnpu-rknn"]
 exclude = ["arceos"]
 
 [workspace.package]

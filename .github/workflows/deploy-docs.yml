@@ -19,6 +19,10 @@ jobs:
           curl -L https://github.com/rust-lang/mdBook/releases/download/v0.4.37/mdbook-v0.4.37-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C mdbook
           echo "$PWD/mdbook" >> $GITHUB_PATH
 
+      - name: Install mdbook-mermaid
+        run: |
+          curl -L https://github.com/badboy/mdbook-mermaid/releases/latest/download/mdbook-mermaid-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C mdbook
+
       - name: Build Book
         run: mdbook build docs
 

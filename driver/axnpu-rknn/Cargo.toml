@@ -1,0 +1,10 @@
+[package]
+name = "axnpu-rknn"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rdrive = "0.18"
+log = "0.4"

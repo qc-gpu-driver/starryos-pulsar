@@ -144,6 +144,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
+name = "as-any"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0f477b951e452a0b6b4a10b53ccd569042d1d01729b519e02074a9c0958a063"
+
+[[package]]
 name = "async-channel"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -542,6 +548,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "axnpu-rknn"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "rdrive",
+]
+
+[[package]]
 name = "axplat"
 version = "0.3.0"
 source = "git+https://github.com/arceos-org/axplat_crates.git?tag=dev-v03#0df0713b1c20eafaeebdc6b0e194b2985e857949"
@@ -750,6 +764,17 @@ dependencies = [
  "log",
  "memory_addr",
  "percpu",
+]
+
+[[package]]
+name = "bare-test-macros"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e585a01076fee271c5aabcf36212acb349fb3e638561d842fffa8ca013f4fdd8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
 ]
 
 [[package]]
@@ -1740,6 +1765,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
+name = "pci_types"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0c2a105c657261a938ff68ee231c199a3d80eef33976004829de761ef5b1a9b"
+dependencies = [
+ "bit_field",
+ "bitflags 2.10.0",
+]
+
+[[package]]
+name = "pcie"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "225c81c0f672afbdd95e55abebe56541870e64e350eba9f7eabfb392112229ab"
+dependencies = [
+ "bare-test-macros",
+ "bit_field",
+ "bitflags 2.10.0",
+ "log",
+ "pci_types",
+ "rdif-pcie",
+ "thiserror",
+]
+
+[[package]]
 name = "percpu"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1884,6 +1934,67 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
 dependencies = [
  "bitflags 2.10.0",
+]
+
+[[package]]
+name = "rdif-base"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f8c32d8cbc18633a412130719b07d31135215d1715ac48fc3888ca835a811ba"
+dependencies = [
+ "as-any",
+ "async-trait",
+ "paste",
+ "rdif-def",
+ "thiserror",
+]
+
+[[package]]
+name = "rdif-def"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c238eb44d86fabc99028adc973f896ce2202aeb6184cc8b89863f2d157d7ca06"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "rdif-pcie"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60c6e8dea6d432b2c03bc3f4238dc59a276aacac6f688a937351e7a313918738"
+dependencies = [
+ "pci_types",
+ "rdif-base",
+ "thiserror",
+]
+
+[[package]]
+name = "rdrive"
+version = "0.18.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f28163d9cd26a17d444424168fde0f5f6f8b867cffdc7de617c2d0865eecf156"
+dependencies = [
+ "fdt-parser",
+ "log",
+ "paste",
+ "pcie",
+ "rdif-base",
+ "rdif-pcie",
+ "rdrive-macros",
+ "spin 0.10.0",
+ "thiserror",
+]
+
+[[package]]
+name = "rdrive-macros"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eab3105c9af32e901a2adc7d920b39ff8b6ee0f6f0b7dfdeaf18f306ec12606f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
 ]
 
 [[package]]

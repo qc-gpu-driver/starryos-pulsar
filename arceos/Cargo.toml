@@ -29,7 +29,7 @@ members = [
     "examples/helloworld-myplat",
     "examples/httpclient",
     "examples/httpserver",
-    "examples/shell",
+    "examples/shell", "modules/axnpu-rknn",
 ]
 
 [workspace.package]
