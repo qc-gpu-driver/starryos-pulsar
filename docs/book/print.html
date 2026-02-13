@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-be72a116.js";
+            window.path_to_searchindex_js = "searchindex-6c72c2f4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-cbe36b10.js"></script>
@@ -322,14 +322,25 @@
 </li>
 </ul>
 <hr>
-<h2 id="待定计划-backlog"><a class="header" href="#待定计划-backlog">待定计划 (Backlog)</a></h2>
-<blockquote>
-<p><em>随着开发深入，以下内容将补充细节</em></p>
-</blockquote>
+<h2 id="第三阶段异步推理支持具体完成点待完成"><a class="header" href="#第三阶段异步推理支持具体完成点待完成">第三阶段：异步推理支持（具体完成点待完成）</a></h2>
+<p><strong>目标</strong>：将当前同步阻塞轮询的任务提交改为中断驱动的异步模式，提交任务后 CPU 不再空转等待，NPU 完成后通过中断通知。</p>
+<h3 id="难点分析"><a class="header" href="#难点分析">难点分析</a></h3>
 <ul>
-<li><input disabled="" type="checkbox"> <strong>中断处理 (IRQ Handler)</strong>：实现异步等待机制，替代轮询。</li>
-<li><input disabled="" type="checkbox"> <strong>IOMMU/SMMU 支持</strong>：实现虚实地址转换，支持非连续内存。</li>
-<li><input disabled="" type="checkbox"> <strong>多核调度策略</strong>：如何分配任务给 3 个 NPU 核心。</li>
+<li><strong>中断处理</strong> — 当前 <code>submit_one()</code> 提交后死循环轮询 <code>interrupt_status</code> 寄存器等待完成。改为中断驱动需要注册 SPI 110/111/112 中断 handler，在中断上下文中唤醒等待的任务，涉及 ArceOS 的中断子系统对接</li>
+<li><strong>异步通知机制</strong> — 用户态需要一种方式知道推理完成。Linux 用 DMA Fence + <code>poll()</code>/<code>eventfd</code>，StarryOS 需要实现类似机制或简化版本（如 fence fd）</li>
+<li><strong>并发安全</strong> — 异步模式下多个任务可能同时在不同核心上执行，<code>Rknpu</code> 结构体的 <code>&amp;mut self</code> 独占访问模型不再适用，需要细粒度锁或 per-core 的状态管理</li>
+<li><strong>超时与错误恢复</strong> — 异步模式下任务超时不能简单 return error，需要 watchdog 定时器 + NPU 软复位的恢复路径</li>
+</ul>
+<hr>
+<h2 id="第四阶段多-ai-模型并发运行具体完成点待完成"><a class="header" href="#第四阶段多-ai-模型并发运行具体完成点待完成">第四阶段：多 AI 模型并发运行（具体完成点待完成）</a></h2>
+<p><strong>目标</strong>：支持多个 AI 模型同时在 NPU 上推理，不同模型可分配到不同核心并行执行，互不干扰。</p>
+<h3 id="难点分析-1"><a class="header" href="#难点分析-1">难点分析</a></h3>
+<ul>
+<li><strong>硬件资源隔离</strong> — 3 个 NPU 核心的 PC/CORE/CNA 等寄存器是 per-core 独立的，但 GLOBAL 寄存器和 SRAM 是共享的。两个模型同时修改 GLOBAL 配置会冲突，需要确认哪些寄存器必须互斥访问（TRM 文档不全，需要实验验证）</li>
+<li><strong>GEM 内存隔离</strong> — 当前 <code>GemPool</code> 是全局单实例，所有模型共享同一个 handle 空间和 DMA buffer 池。多模型需要 per-context 的 GEM 表，避免一个模型误操作另一个模型的内存。<code>comfirm_write_all</code> / <code>prepare_read_all</code> 会刷全部 buffer，多模型下会误刷</li>
+<li><strong>核心分配策略</strong> — 大模型用多核、小模型用单核？固定分配还是动态调度？NPU 硬件不支持抢占，只能等当前 batch 完成才能切换，策略设计直接影响吞吐和延迟</li>
+<li><strong>用户态 session 管理</strong> — 每个 <code>open("/dev/dri/renderD128")</code> 需要创建独立 session，ioctl 根据 session 路由到对应的 GEM 表和任务队列，<code>rknn_run</code> 变为非阻塞返回 fence fd</li>
+<li><strong>IOMMU 支持</strong> — 多模型并发时，不同模型的 DMA 地址空间需要隔离，否则一个模型可以通过构造 DMA 地址读写另一个模型的数据，IOMMU/SMMU 是硬隔离的前提</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="项目周报"><a class="header" href="#项目周报">项目周报</a></h1>
@@ -638,6 +649,33 @@ fn probe_rknpu(info: FdtInfo&lt;'_&gt;, dev: PlatformDevice) -&gt; Result&lt;(),
 <p>来源：RK3588 TRM §36.4.3 Detail Registers Description</p>
 </blockquote>
 <p>PC 是 NPU 的命令流执行引擎，负责：从 DMA 地址读取寄存器命令流 → 按序写入各功能模块寄存器 → 触发执行 → 产生完成中断。</p>
+<hr>
+<h2 id="rknn_pc_version0x0000"><a class="header" href="#rknn_pc_version0x0000">RKNN_pc_version（0x0000）</a></h2>
+<p>硬件版本寄存器（只读）。驱动通过 <code>version + (version_num &amp; 0xFFFF)</code> 计算完整版本号。</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th style="text-align: center">Bit</th><th style="text-align: center">属性</th><th style="text-align: center">复位值</th><th style="text-align: left">字段名</th><th style="text-align: left">描述</th></tr>
+</thead>
+<tbody>
+<tr><td style="text-align: center">31:0</td><td style="text-align: center">RO</td><td style="text-align: center">0x0</td><td style="text-align: left"><code>version</code></td><td style="text-align: left">硬件版本标识</td></tr>
+</tbody>
+</table>
+</div>
+<hr>
+<h2 id="rknn_pc_version_num0x0004"><a class="header" href="#rknn_pc_version_num0x0004">RKNN_pc_version_num（0x0004）</a></h2>
+<p>硬件版本号寄存器（只读）。</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th style="text-align: center">Bit</th><th style="text-align: center">属性</th><th style="text-align: center">复位值</th><th style="text-align: left">字段名</th><th style="text-align: left">描述</th></tr>
+</thead>
+<tbody>
+<tr><td style="text-align: center">31:16</td><td style="text-align: center">RO</td><td style="text-align: center">0x0</td><td style="text-align: left">—</td><td style="text-align: left">保留</td></tr>
+<tr><td style="text-align: center">15:0</td><td style="text-align: center">RO</td><td style="text-align: center">0x0</td><td style="text-align: left"><code>version_num</code></td><td style="text-align: left">硬件版本编号</td></tr>
+</tbody>
+</table>
+</div>
 <hr>
 <h2 id="rknn_pc_operation_enable0x0008"><a class="header" href="#rknn_pc_operation_enable0x0008">RKNN_pc_operation_enable（0x0008）</a></h2>
 <p>操作使能寄存器。</p>
@@ -3310,23 +3348,47 @@ fn probe_rknpu(info: FdtInfo&lt;'_&gt;, dev: PlatformDevice) -&gt; Result&lt;(),
 </table>
 </div>
 <hr>
-<h2 id="附ddma-统计寄存器ioctlh-定义"><a class="header" href="#附ddma-统计寄存器ioctlh-定义">附：DDMA 统计寄存器（ioctl.h 定义）</a></h2>
-<p>以下寄存器偏移来自 <span style="background:#e3f2fd;padding:1px 4px;border-radius:3px;font-size:0.8em">rknpu-ioctl.h</span>，用于 <code>ACTION</code> 类 ioctl 读取读写量统计：</p>
+<h2 id="dt_wr_amountddma-0x8034--sdma-0x9034"><a class="header" href="#dt_wr_amountddma-0x8034--sdma-0x9034">dt_wr_amount（DDMA: 0x8034 / SDMA: 0x9034）</a></h2>
+<p>数据写入量统计。用于 ioctl <code>GetDtWrAmount</code>。</p>
 <div class="table-wrapper">
 <table>
 <thead>
-<tr><th>偏移</th><th>名称</th><th>说明</th><th>关联 Action</th></tr>
+<tr><th style="text-align: center">Bit</th><th style="text-align: center">属性</th><th style="text-align: center">复位值</th><th style="text-align: left">字段名</th><th style="text-align: left">描述</th></tr>
 </thead>
 <tbody>
-<tr><td><code>0x8010</code></td><td><code>CLR_ALL_RW_AMOUNT</code></td><td>清除全部读写量统计</td><td><code>ActClrTotalRwAmount</code></td></tr>
-<tr><td><code>0x8034</code></td><td><code>DT_WR_AMOUNT</code></td><td>数据写入量</td><td><code>GetDtWrAmount</code></td></tr>
-<tr><td><code>0x8038</code></td><td><code>DT_RD_AMOUNT</code></td><td>数据读取量</td><td><code>GetDtRdAmount</code></td></tr>
-<tr><td><code>0x803C</code></td><td><code>WT_RD_AMOUNT</code></td><td>权重读取量</td><td><code>GetWtRdAmount</code></td></tr>
+<tr><td style="text-align: center">31:0</td><td style="text-align: center">RO</td><td style="text-align: center">0x0</td><td style="text-align: left"><code>dt_wr_amount</code></td><td style="text-align: left">数据写入量</td></tr>
 </tbody>
 </table>
 </div>
+<hr>
+<h2 id="dt_rd_amountddma-0x8038--sdma-0x9038"><a class="header" href="#dt_rd_amountddma-0x8038--sdma-0x9038">dt_rd_amount（DDMA: 0x8038 / SDMA: 0x9038）</a></h2>
+<p>数据读取量统计。用于 ioctl <code>GetDtRdAmount</code>。</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th style="text-align: center">Bit</th><th style="text-align: center">属性</th><th style="text-align: center">复位值</th><th style="text-align: left">字段名</th><th style="text-align: left">描述</th></tr>
+</thead>
+<tbody>
+<tr><td style="text-align: center">31:0</td><td style="text-align: center">RO</td><td style="text-align: center">0x0</td><td style="text-align: left"><code>dt_rd_amount</code></td><td style="text-align: left">数据读取量</td></tr>
+</tbody>
+</table>
+</div>
+<hr>
+<h2 id="wt_rd_amountddma-0x803c--sdma-0x903c"><a class="header" href="#wt_rd_amountddma-0x803c--sdma-0x903c">wt_rd_amount（DDMA: 0x803C / SDMA: 0x903C）</a></h2>
+<p>权重读取量统计。用于 ioctl <code>GetWtRdAmount</code>。</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th style="text-align: center">Bit</th><th style="text-align: center">属性</th><th style="text-align: center">复位值</th><th style="text-align: left">字段名</th><th style="text-align: left">描述</th></tr>
+</thead>
+<tbody>
+<tr><td style="text-align: center">31:0</td><td style="text-align: center">RO</td><td style="text-align: center">0x0</td><td style="text-align: left"><code>wt_rd_amount</code></td><td style="text-align: left">权重读取量</td></tr>
+</tbody>
+</table>
+</div>
+<hr>
 <blockquote>
-<p><strong>清除操作</strong> <span style="background:#fff3e0;padding:1px 4px;border-radius:3px;font-size:0.8em">StarryOS Rust 驱动</span>：写 <code>0x80000101</code> 再写 <code>0x00000101</code>（两次写入进行 latch/clear）。</p>
+<p><strong>清除操作</strong>：写 <code>rd_weight_1</code>(0x8010) 值 <code>0x80000101</code> 再写 <code>0x00000101</code>（两次写入进行 latch/clear）。</p>
 </blockquote>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="global-寄存器块全局使能"><a class="header" href="#global-寄存器块全局使能">GLOBAL 寄存器块（全局使能）</a></h1>

@@ -1,134 +1,138 @@
-# Starry OS
+# StarryOS-Pulsar
 
-*An experimental monolithic OS based on ArceOS*
+> **⚠️ 注意：** 本项目基于 OrangePi 5 Plus 开发板，需要预先在板载 eMMC 中刷入系统镜像。
+>
+> 镜像下载：https://pan.baidu.com/s/1kWLx3xF8MXz5owP3bIWnfg?pwd=t34q （提取码: t34q）
+>
+> 具体刷写操作见：[决赛技术报告](https://atomgit.com/aios-porting/3906cf9f2ccbf898bd3512d5862ef92e/blob/master/%E5%86%B3%E8%B5%9B-%E6%8A%80%E6%9C%AF%E6%8A%A5%E5%91%8A.md)
 
-[![GitHub Stars](https://img.shields.io/github/stars/Starry-OS/StarryOS?style=for-the-badge)](https://github.com/Starry-OS/StarryOS/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/Starry-OS/StarryOS?style=for-the-badge)](https://github.com/Starry-OS/StarryOS/network)
-[![GitHub License](https://img.shields.io/github/license/Starry-OS/StarryOS?style=for-the-badge)](https://github.com/Starry-OS/StarryOS/blob/main/LICENSE)
-[![Build status](https://img.shields.io/github/check-runs/Starry-OS/StarryOS/main?style=for-the-badge)](https://github.com/Starry-OS/StarryOS/actions)
+基于 [StarryOS NPU 版本](https://atomgit.com/aios-porting/3906cf9f2ccbf898bd3512d5862ef92e) 继续开发的分支，专注于 RK3588 NPU 驱动开发，目标是让 NPU 驱动支持**异步执行**和**多核并发**。
 
-## Supported Architectures
+## 项目概览
 
-- [x] RISC-V 64
-- [x] LoongArch64
-- [x] AArch64
-- [ ] x86_64 (work in progress)
+StarryOS-Pulsar 在 StarryOS 的基础上，针对瑞芯微 RK3588 SoC 的 NPU（Neural Processing Unit）进行深度驱动开发，主要工作包括：
 
-## Features
+- NPU 寄存器访问层（基于 svd2rust 类型安全抽象）
+- 电源域管理（rockchip-pm）与时钟树控制（rk3588-clk）
+- NPU 三核心 MMIO 映射与初始化
+- DRM/ioctl 接口层（开发中）
+- GEM 内存管理与 DMA 传输（开发中）
+- 任务提交与中断处理（开发中）
 
-TODO
+## 环境要求
 
-## Quick Start
+- Rust nightly 工具链
+- 目标板：**OrangePi 5 Plus**（RK3588）
+- 串口连接线（用于 U-Boot 加载内核）
+- [ostool](https://github.com/os-module/ostool) 工具
 
-### 1. Clone repo
+## 快速开始
 
-```bash
-git clone --recursive https://github.com/Starry-OS/StarryOS.git
-cd StarryOS
-```
-
-Or if you have already cloned it without `--recursive` option:
-
-```bash
-cd StarryOS
-git submodule update --init --recursive
-```
-
-### 2. Install Prerequisites
-
-#### A. Using Docker
-
-We provide a prebuilt Docker image with all dependencies installed.
-
-For users in mainland China, you can use the following image which includes optimizations like Debian packages mirrors and crates.io mirrors:
+### 1. 克隆项目
 
 ```bash
-docker pull docker.cnb.cool/starry-os/arceos-build
-docker run -it --rm -v $(pwd):/workspace -w /workspace docker.cnb.cool/starry-os/arceos-build
+git clone <本项目地址>
+cd starryos-pulsar
 ```
 
-For other users, you can use the image hosted on GitHub Container Registry:
+### 2. 安装 ostool
 
 ```bash
-docker pull ghcr.io/arceos-org/arceos-build
-docker run -it --rm -v $(pwd):/workspace -w /workspace ghcr.io/arceos-org/arceos-build
+cargo install ostool
 ```
 
-**Note:** The `--rm` flag will destroy the container instance upon exit. Any changes made inside the container (outside of the mounted `/workspace` volume) will be lost. Please refer to the [Docker documentation](https://docs.docker.com/) for more advanced usage.
+### 3. 配置编译选项
 
-#### B. Manual Setup
-
-##### i. Install System Dependencies
-
-This step may vary depending on your operating system. Here is an example based on Debian:
+进入 Starry 目录，运行 menuconfig 进行配置：
 
 ```bash
-sudo apt update
-sudo apt install -y build-essential cmake clang qemu-system
+cd Starry
+ostool menuconfig
 ```
 
-**Note:** Running on LoongArch64 requires QEMU 10. If the QEMU version in your Linux distribution is too old (e.g. Ubuntu), consider building QEMU from [source](https://www.qemu.org/download/).
+#### Step 1 & Step 2：设置编译命令
 
-##### ii. Install Musl Toolchain
+在 menuconfig 界面中设置编译命令和相关参数。
 
-1. Download files from [setup-musl releases](https://github.com/arceos-org/setup-musl/releases/tag/prebuilt)
-2. Extract to some path, for example `/opt/riscv64-linux-musl-cross`
-3. Add bin folder to `PATH`, for example:
+![设置编译命令](docs/mdimage/step1.png)
 
-   ```bash
-   export PATH=/opt/riscv64-linux-musl-cross/bin:$PATH
-   ```
+![编译参数配置](docs/mdimage/step2.png)
 
-##### iii. Setup Rust toolchain
+#### Step 3：设置编译输出地址
+
+设置编译后 ELF 文件的输出路径（该文件即为需要加载进开发板的内核镜像）。
+
+![设置输出地址](docs/mdimage/step3.png)
+
+#### Step 4：保存配置
+
+按 `s` 键保存配置。
+
+![保存配置](docs/mdimage/step4.png)
+
+### 4. 配置 U-Boot 串口参数
+
+运行以下命令进入 U-Boot 配置：
 
 ```bash
-# Install rustup from https://rustup.rs or using your system package manager
-
-# Automatically download components via rustup
-cd StarryOS
-cargo -V
+ostool menuconfig uboot
 ```
 
-### 3. Prepare rootfs
+#### Step 5：设置波特率
+
+将波特率设置为 **1500000**（基于 OrangePi 5 Plus 的默认配置）。
+
+![设置波特率](docs/mdimage/step5.png)
+
+#### Step 6：设置设备树文件
+
+选择对应的设备树文件（.dtb）。
+
+![设置设备树](docs/mdimage/step6.png)
+
+#### Step 7：设置串口设备
+
+设置开发板对应的串口设备路径。
+
+![设置串口设备](docs/mdimage/step7.png)
+
+### 5. 烧录与启动
 
 ```bash
-# Default target: riscv64
-make rootfs
-# Explicit target
-make ARCH=riscv64 rootfs
-make ARCH=loongarch64 rootfs
+ostool run uboot
 ```
 
-This will download rootfs image from [Starry-OS/rootfs](https://github.com/Starry-OS/rootfs/releases) and set up the disk file for running on QEMU.
+#### Step 8：开发板上电
 
-### 4. Build and run on QEMU
+执行命令后，给开发板**上电或开机**。ostool 会通过 U-Boot 的 `loady` 命令，经串口传输打包好的 FIT 镜像（内核 + 设备树文件）。
+
+![上电启动](docs/mdimage/step8.png)
+
+#### Step 9：等待传输完成
+
+串口传输时间较长，请耐心等待。也可以通过 `ostool menuconfig` 配置 `net` 选项，使用网络方式快速传输。
+
+![传输中](docs/mdimage/step9.png)
+
+### 6. 运行 NPU 推理测试
+
+#### Step 10：进入系统
+
+传输完成后系统将自动启动。
+
+![系统启动](docs/mdimage/step10.png)
+
+#### Step 11：运行测试
 
 ```bash
-# Default target: riscv64
-make build
-# Explicit target
-make ARCH=riscv64 build
-make ARCH=loongarch64 build
-
-# Run on QEMU (also rebuilds if necessary)
-make ARCH=riscv64 run
-make ARCH=loongarch64 run
+cd /demo
+./llama.sh
 ```
 
-Note:
+运行 NPU 推理测试。`/demo` 目录下还包含其他测例（如 YOLO 目标检测等），可根据需要运行。
 
-1. Binary dependencies will be automatically built during `make build`.
-2. You don't have to rerun `build` every time. `run` automatically rebuilds if necessary.
-3. The disk file will **not** be reset between each run. As a result, if you want to switch to another architecture, you must run `make rootfs` with the new architecture before `make run`.
+![运行推理测试](docs/mdimage/step11.png)
 
-## What next?
+## 许可证
 
-You can check out the [GUI guide](./docs/x11.md) to set up a graphical environment, or explore other documentation in this folder.
-
-If you're interested in contributing to the project, please see our [Contributing Guide](./CONTRIBUTING.md).
-
-See more build options in the [Makefile](./Makefile).
-
-## License
-
-This project is now released under the Apache License 2.0. All modifications and new contributions in our project are distributed under the same license. See the [LICENSE](./LICENSE) and [NOTICE](./NOTICE) files for details.
+Apache-2.01

@@ -164,15 +164,34 @@ DMA 状态。
 
 ---
 
-## 附：DDMA 统计寄存器（ioctl.h 定义）
+## dt_wr_amount（DDMA: 0x8034 / SDMA: 0x9034）
 
-以下寄存器偏移来自 <span style="background:#e3f2fd;padding:1px 4px;border-radius:3px;font-size:0.8em">rknpu-ioctl.h</span>，用于 `ACTION` 类 ioctl 读取读写量统计：
+数据写入量统计。用于 ioctl `GetDtWrAmount`。
 
-| 偏移 | 名称 | 说明 | 关联 Action |
-|------|------|------|------------|
-| `0x8010` | `CLR_ALL_RW_AMOUNT` | 清除全部读写量统计 | `ActClrTotalRwAmount` |
-| `0x8034` | `DT_WR_AMOUNT` | 数据写入量 | `GetDtWrAmount` |
-| `0x8038` | `DT_RD_AMOUNT` | 数据读取量 | `GetDtRdAmount` |
-| `0x803C` | `WT_RD_AMOUNT` | 权重读取量 | `GetWtRdAmount` |
+| Bit | 属性 | 复位值 | 字段名 | 描述 |
+|:---:|:----:|:------:|:-------|:-----|
+| 31:0 | RO | 0x0 | `dt_wr_amount` | 数据写入量 |
 
-> **清除操作** <span style="background:#fff3e0;padding:1px 4px;border-radius:3px;font-size:0.8em">StarryOS Rust 驱动</span>：写 `0x80000101` 再写 `0x00000101`（两次写入进行 latch/clear）。
+---
+
+## dt_rd_amount（DDMA: 0x8038 / SDMA: 0x9038）
+
+数据读取量统计。用于 ioctl `GetDtRdAmount`。
+
+| Bit | 属性 | 复位值 | 字段名 | 描述 |
+|:---:|:----:|:------:|:-------|:-----|
+| 31:0 | RO | 0x0 | `dt_rd_amount` | 数据读取量 |
+
+---
+
+## wt_rd_amount（DDMA: 0x803C / SDMA: 0x903C）
+
+权重读取量统计。用于 ioctl `GetWtRdAmount`。
+
+| Bit | 属性 | 复位值 | 字段名 | 描述 |
+|:---:|:----:|:------:|:-------|:-----|
+| 31:0 | RO | 0x0 | `wt_rd_amount` | 权重读取量 |
+
+---
+
+> **清除操作**：写 `rd_weight_1`(0x8010) 值 `0x80000101` 再写 `0x00000101`（两次写入进行 latch/clear）。
