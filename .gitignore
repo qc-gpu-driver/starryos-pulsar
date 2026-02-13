@@ -1,2 +1,5 @@
 /target
 .spec-workflow
+*.bin
+*.elf
+*.img
