@@ -300,17 +300,29 @@
 </tbody></table>
 </div>
 <hr />
-<h2 id="附ddma-统计寄存器ioctlh-定义"><a class="header" href="#附ddma-统计寄存器ioctlh-定义">附：DDMA 统计寄存器（ioctl.h 定义）</a></h2>
-<p>以下寄存器偏移来自 <span style="background:#e3f2fd;padding:1px 4px;border-radius:3px;font-size:0.8em">rknpu-ioctl.h</span>，用于 <code>ACTION</code> 类 ioctl 读取读写量统计：</p>
-<div class="table-wrapper"><table><thead><tr><th>偏移</th><th>名称</th><th>说明</th><th>关联 Action</th></tr></thead><tbody>
-<tr><td><code>0x8010</code></td><td><code>CLR_ALL_RW_AMOUNT</code></td><td>清除全部读写量统计</td><td><code>ActClrTotalRwAmount</code></td></tr>
-<tr><td><code>0x8034</code></td><td><code>DT_WR_AMOUNT</code></td><td>数据写入量</td><td><code>GetDtWrAmount</code></td></tr>
-<tr><td><code>0x8038</code></td><td><code>DT_RD_AMOUNT</code></td><td>数据读取量</td><td><code>GetDtRdAmount</code></td></tr>
-<tr><td><code>0x803C</code></td><td><code>WT_RD_AMOUNT</code></td><td>权重读取量</td><td><code>GetWtRdAmount</code></td></tr>
+<h2 id="dt_wr_amountddma-0x8034--sdma-0x9034"><a class="header" href="#dt_wr_amountddma-0x8034--sdma-0x9034">dt_wr_amount（DDMA: 0x8034 / SDMA: 0x9034）</a></h2>
+<p>数据写入量统计。用于 ioctl <code>GetDtWrAmount</code>。</p>
+<div class="table-wrapper"><table><thead><tr><th style="text-align: center">Bit</th><th style="text-align: center">属性</th><th style="text-align: center">复位值</th><th style="text-align: left">字段名</th><th style="text-align: left">描述</th></tr></thead><tbody>
+<tr><td style="text-align: center">31:0</td><td style="text-align: center">RO</td><td style="text-align: center">0x0</td><td style="text-align: left"><code>dt_wr_amount</code></td><td style="text-align: left">数据写入量</td></tr>
 </tbody></table>
 </div>
+<hr />
+<h2 id="dt_rd_amountddma-0x8038--sdma-0x9038"><a class="header" href="#dt_rd_amountddma-0x8038--sdma-0x9038">dt_rd_amount（DDMA: 0x8038 / SDMA: 0x9038）</a></h2>
+<p>数据读取量统计。用于 ioctl <code>GetDtRdAmount</code>。</p>
+<div class="table-wrapper"><table><thead><tr><th style="text-align: center">Bit</th><th style="text-align: center">属性</th><th style="text-align: center">复位值</th><th style="text-align: left">字段名</th><th style="text-align: left">描述</th></tr></thead><tbody>
+<tr><td style="text-align: center">31:0</td><td style="text-align: center">RO</td><td style="text-align: center">0x0</td><td style="text-align: left"><code>dt_rd_amount</code></td><td style="text-align: left">数据读取量</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h2 id="wt_rd_amountddma-0x803c--sdma-0x903c"><a class="header" href="#wt_rd_amountddma-0x803c--sdma-0x903c">wt_rd_amount（DDMA: 0x803C / SDMA: 0x903C）</a></h2>
+<p>权重读取量统计。用于 ioctl <code>GetWtRdAmount</code>。</p>
+<div class="table-wrapper"><table><thead><tr><th style="text-align: center">Bit</th><th style="text-align: center">属性</th><th style="text-align: center">复位值</th><th style="text-align: left">字段名</th><th style="text-align: left">描述</th></tr></thead><tbody>
+<tr><td style="text-align: center">31:0</td><td style="text-align: center">RO</td><td style="text-align: center">0x0</td><td style="text-align: left"><code>wt_rd_amount</code></td><td style="text-align: left">权重读取量</td></tr>
+</tbody></table>
+</div>
+<hr />
 <blockquote>
-<p><strong>清除操作</strong> <span style="background:#fff3e0;padding:1px 4px;border-radius:3px;font-size:0.8em">StarryOS Rust 驱动</span>：写 <code>0x80000101</code> 再写 <code>0x00000101</code>（两次写入进行 latch/clear）。</p>
+<p><strong>清除操作</strong>：写 <code>rd_weight_1</code>(0x8010) 值 <code>0x80000101</code> 再写 <code>0x00000101</code>（两次写入进行 latch/clear）。</p>
 </blockquote>
 
                     </main>

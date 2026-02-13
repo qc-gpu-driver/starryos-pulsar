@@ -380,17 +380,25 @@
 </li>
 </ul>
 <hr />
-<h2 id="待定计划-backlog"><a class="header" href="#待定计划-backlog">待定计划 (Backlog)</a></h2>
-<blockquote>
-<p><em>随着开发深入，以下内容将补充细节</em></p>
-</blockquote>
+<h2 id="第三阶段异步推理支持具体完成点待完成"><a class="header" href="#第三阶段异步推理支持具体完成点待完成">第三阶段：异步推理支持（具体完成点待完成）</a></h2>
+<p><strong>目标</strong>：将当前同步阻塞轮询的任务提交改为中断驱动的异步模式，提交任务后 CPU 不再空转等待，NPU 完成后通过中断通知。</p>
+<h3 id="难点分析"><a class="header" href="#难点分析">难点分析</a></h3>
 <ul>
-<li><input disabled="" type="checkbox"/>
-<strong>中断处理 (IRQ Handler)</strong>：实现异步等待机制，替代轮询。</li>
-<li><input disabled="" type="checkbox"/>
-<strong>IOMMU/SMMU 支持</strong>：实现虚实地址转换，支持非连续内存。</li>
-<li><input disabled="" type="checkbox"/>
-<strong>多核调度策略</strong>：如何分配任务给 3 个 NPU 核心。</li>
+<li><strong>中断处理</strong> — 当前 <code>submit_one()</code> 提交后死循环轮询 <code>interrupt_status</code> 寄存器等待完成。改为中断驱动需要注册 SPI 110/111/112 中断 handler，在中断上下文中唤醒等待的任务，涉及 ArceOS 的中断子系统对接</li>
+<li><strong>异步通知机制</strong> — 用户态需要一种方式知道推理完成。Linux 用 DMA Fence + <code>poll()</code>/<code>eventfd</code>，StarryOS 需要实现类似机制或简化版本（如 fence fd）</li>
+<li><strong>并发安全</strong> — 异步模式下多个任务可能同时在不同核心上执行，<code>Rknpu</code> 结构体的 <code>&amp;mut self</code> 独占访问模型不再适用，需要细粒度锁或 per-core 的状态管理</li>
+<li><strong>超时与错误恢复</strong> — 异步模式下任务超时不能简单 return error，需要 watchdog 定时器 + NPU 软复位的恢复路径</li>
+</ul>
+<hr />
+<h2 id="第四阶段多-ai-模型并发运行具体完成点待完成"><a class="header" href="#第四阶段多-ai-模型并发运行具体完成点待完成">第四阶段：多 AI 模型并发运行（具体完成点待完成）</a></h2>
+<p><strong>目标</strong>：支持多个 AI 模型同时在 NPU 上推理，不同模型可分配到不同核心并行执行，互不干扰。</p>
+<h3 id="难点分析-1"><a class="header" href="#难点分析-1">难点分析</a></h3>
+<ul>
+<li><strong>硬件资源隔离</strong> — 3 个 NPU 核心的 PC/CORE/CNA 等寄存器是 per-core 独立的，但 GLOBAL 寄存器和 SRAM 是共享的。两个模型同时修改 GLOBAL 配置会冲突，需要确认哪些寄存器必须互斥访问（TRM 文档不全，需要实验验证）</li>
+<li><strong>GEM 内存隔离</strong> — 当前 <code>GemPool</code> 是全局单实例，所有模型共享同一个 handle 空间和 DMA buffer 池。多模型需要 per-context 的 GEM 表，避免一个模型误操作另一个模型的内存。<code>comfirm_write_all</code> / <code>prepare_read_all</code> 会刷全部 buffer，多模型下会误刷</li>
+<li><strong>核心分配策略</strong> — 大模型用多核、小模型用单核？固定分配还是动态调度？NPU 硬件不支持抢占，只能等当前 batch 完成才能切换，策略设计直接影响吞吐和延迟</li>
+<li><strong>用户态 session 管理</strong> — 每个 <code>open("/dev/dri/renderD128")</code> 需要创建独立 session，ioctl 根据 session 路由到对应的 GEM 表和任务队列，<code>rknn_run</code> 变为非阻塞返回 fence fd</li>
+<li><strong>IOMMU 支持</strong> — 多模型并发时，不同模型的 DMA 地址空间需要隔离，否则一个模型可以通过构造 DMA 地址读写另一个模型的数据，IOMMU/SMMU 是硬隔离的前提</li>
 </ul>
 
                     </main>
