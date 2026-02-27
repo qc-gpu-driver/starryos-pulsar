@@ -1,30 +1,29 @@
-//! Matrix multiplication on the NPU: A(m×k) × B(k×n) → C(m×n).
+//! NPU 上的矩阵乘法：A(m×k) × B(k×n) → C(m×n)。
 //!
-//! # How matmul maps to the NPU convolution pipeline
+//! # 矩阵乘法如何映射到 NPU 卷积流水线
 //!
-//! The RK3588 NPU is a **convolution accelerator** — it has no dedicated
-//! matmul instruction.  We implement matmul by treating it as a 1×1
-//! convolution:
+//! RK3588 NPU 是一个**卷积加速器** — 它没有专用的矩阵乘法指令。
+//! 我们通过将其视为 1×1 卷积来实现矩阵乘法：
 //!
 //! ```text
-//!  Matrix multiply:   C[m,n] = A[m,k] × B[k,n]
+//!  矩阵乘法：      C[m,n] = A[m,k] × B[k,n]
 //!
-//!  Mapped to conv:    input  = A reshaped as (W=1, H=m, C=k) feature map
-//!                     weight = B reshaped as (1×1×k) kernel × N output channels
-//!                     output = C as (W=1, H=m, C=n) feature map
+//!  映射到卷积：    input  = A 重塑为 (W=1, H=m, C=k) 特征图
+//!                 weight = B 重塑为 (1×1×k) 内核 × N 个输出通道
+//!                 output = C 作为 (W=1, H=m, C=n) 特征图
 //! ```
 //!
-//! The CNA loads the "feature" (A) and "weight" (B), the MAC does the
-//! multiply-accumulate (dot products), and the DPU writes the result (C).
+//! CNA 加载"特征"（A）和"权重"（B），MAC 执行乘累加（点积），
+//! DPU 写入结果（C）。
 //!
-//! # Memory layout (hardware-specific)
+//! # 内存布局（硬件特定）
 //!
-//! The NPU expects data in a **tiled/interleaved** format, not row-major.
-//! - Input features: tiled in groups of 16 channels (see `feature_data()`)
-//! - Weights (i8): tiled in 32×32 blocks (see `weight_int8()`)
-//! - Output: tiled in groups of 4 channels for i32 output
+//! NPU 期望数据采用**平铺/交错**格式，而不是行主序。
+//! - 输入特征：以 16 个通道为一组进行平铺（参见 `feature_data()`）
+//! - 权重（i8）：以 32×32 块进行平铺（参见 `weight_int8()`）
+//! - 输出：对于 i32 输出，以 4 个通道为一组进行平铺
 //!
-//! The `set_a()` / `set_b()` methods handle the CPU→NPU layout conversion.
+//! `set_a()` / `set_b()` 方法处理 CPU→NPU 布局转换。
 
 use super::super::def::*;
 use dma_api::{DVec, Direction};
@@ -35,18 +34,18 @@ use crate::{
     op::{Operation, OperationTrait, Precision},
 };
 
-/// Matrix multiplication operation: A(m×k, T) × B(k×n, T) → C(m×n, O).
+/// 矩阵乘法操作：A(m×k, T) × B(k×n, T) → C(m×n, O)。
 ///
-/// Owns three DMA buffers for input, weight, and output tensors.
-/// The type parameters `T` (input element) and `O` (output element) allow
-/// different precision combinations (e.g. i8×i8→i32).
+/// 拥有输入、权重和输出张量的三个 DMA 缓冲区。
+/// 类型参数 `T`（输入元素）和 `O`（输出元素）允许
+/// 不同的精度组合（例如 i8×i8→i32）。
 pub struct MatMul<T: Sized + Copy, O: Sized + Copy> {
-    m: u16,      // number of rows in A / rows in C
-    k: u16,      // shared dimension (cols of A = rows of B)
-    n: u16,      // number of cols in B / cols in C
-    input: DVec<T>,   // DMA buffer for matrix A (feature data)
-    weight: DVec<T>,  // DMA buffer for matrix B (weight data)
-    output: DVec<O>,  // DMA buffer for matrix C (result)
+    m: u16,      // A 的行数 / C 的行数
+    k: u16,      // 共享维度（A 的列数 = B 的行数）
+    n: u16,      // B 的列数 / C 的列数
+    input: DVec<T>,   // 矩阵 A 的 DMA 缓冲区（特征数据）
+    weight: DVec<T>,  // 矩阵 B 的 DMA 缓冲区（权重数据）
+    output: DVec<O>,  // 矩阵 C 的 DMA 缓冲区（结果）
 }
 
 impl<T: Sized + Copy, O: Sized + Copy> MatMul<T, O> {
@@ -79,10 +78,10 @@ impl<T: Sized + Copy, O: Sized + Copy> MatMul<T, O> {
         }
     }
 
-    /// Write matrix A into the DMA buffer in the NPU's tiled layout.
+    /// 以 NPU 的平铺布局将矩阵 A 写入 DMA 缓冲区。
     ///
-    /// The NPU expects features in a channel-interleaved format (groups of 16).
-    /// This method converts from row-major `a[m*k]` to the hardware layout.
+    /// NPU 期望特征采用通道交错格式（16 个一组）。
+    /// 此方法从行主序 `a[m*k]` 转换为硬件布局。
     pub fn set_a(&mut self, a: &[T]) {
         assert_eq!(a.len(), self.m as usize * self.k as usize);
 
@@ -90,7 +89,7 @@ impl<T: Sized + Copy, O: Sized + Copy> MatMul<T, O> {
         let k = self.k as i32;
         for mm in 1..=m {
             for kk in 1..=k {
-                // feature_data() computes the tiled offset for element (mm, kk)
+                // feature_data() 计算元素 (mm, kk) 的平铺偏移量
                 let idx = feature_data(k, m, 1, 16, kk, mm, 1) as usize;
                 let src = ((mm - 1) * k + (kk - 1)) as usize;
                 self.input.set(idx, a[src]);
@@ -98,14 +97,13 @@ impl<T: Sized + Copy, O: Sized + Copy> MatMul<T, O> {
         }
     }
 
-    /// Pack all CNA + MAC + DPU register values into 64-bit register commands.
+    /// 将所有 CNA + MAC + DPU 寄存器值打包成 64 位寄存器命令。
     ///
-    /// This is the core of the "compiler" — it takes the three descriptors
-    /// (CNA, MAC/core, DPU) and produces 108 `npu_op()` entries that the PC
-    /// module will DMA-read and apply to the hardware pipeline.
+    /// 这是"编译器"的核心 — 它接受三个描述符（CNA、MAC/core、DPU）
+    /// 并生成 108 个 `npu_op()` 条目，PC 模块将 DMA 读取并应用于硬件流水线。
     ///
-    /// The order matters: CNA regs first (slots 1-48), then MAC/core (49-53),
-    /// then DPU (54-103), then control ops (104-107).
+    /// 顺序很重要：首先是 CNA 寄存器（槽 1-48），然后是 MAC/core（49-53），
+    /// 然后是 DPU（54-103），最后是控制操作（104-107）。
     fn gen_matul(
         &self,
         reg_cmds: &mut [u64],
@@ -290,32 +288,32 @@ impl<T: Sized + Copy, O: Sized + Copy> MatMul<T, O> {
         reg_cmds[101] = npu_op(OP_REG_DPU, 0x0, DPU_LUT_LE_SLOPE_SHIFT);
         reg_cmds[102] = npu_op(OP_REG_DPU, 0x0, DPU_LUT_LO_SLOPE_SCALE);
         reg_cmds[103] = npu_op(OP_REG_DPU, 0x0, DPU_LUT_LO_SLOPE_SHIFT);
-        // --- Control operations (slots 104-107) ---
-        // These tell the PC to commit the register writes and start execution
-        reg_cmds[104] = npu_op(OP_NONE, 0x0, 0x0);           // NOP separator
-        reg_cmds[105] = npu_op(OP_REG_PC, 0x0, PC_REGISTER_AMOUNTS); // reset amount
-        reg_cmds[106] = npu_op(OP_40, 0x0, 0x0);             // sync barrier
-        reg_cmds[107] = npu_op(                               // ENABLE: kick off
-            OP_ENABLE,                                        //   CNA + DPU pipeline
+        // --- 控制操作（槽 104-107）---
+        // 这些告诉 PC 提交寄存器写入并开始执行
+        reg_cmds[104] = npu_op(OP_NONE, 0x0, 0x0);           // NOP 分隔符
+        reg_cmds[105] = npu_op(OP_REG_PC, 0x0, PC_REGISTER_AMOUNTS); // 重置数量
+        reg_cmds[106] = npu_op(OP_40, 0x0, 0x0);             // 同步屏障
+        reg_cmds[107] = npu_op(                               // ENABLE：启动
+            OP_ENABLE,                                        //   CNA + DPU 流水线
             PC_ENABLE_DPU | PC_ENABLE_CNA | PC_ENABLE,
             PC_OPERATION_ENABLE,
         );
     }
 }
 
-/// Implementation for i8 input × i8 weight → i32 output matmul.
+/// i8 输入 × i8 权重 → i32 输出矩阵乘法的实现。
 ///
-/// This is the most common quantized inference path.
-/// The NPU's MAC unit accumulates i8×i8 products into i32 accumulators.
+/// 这是最常见的量化推理路径。
+/// NPU 的 MAC 单元将 i8×i8 乘积累加到 i32 累加器中。
 impl OperationTrait for MatMul<i8, i32> {
-    /// Fill the register command buffer for an i8 matmul.
+    /// 为 i8 矩阵乘法填充寄存器命令缓冲区。
     ///
-    /// Steps:
-    /// 1. Compute CNA descriptor from M, K, N dimensions
-    /// 2. Compute CBUF bank allocation (feature vs weight)
-    /// 3. Fill MAC (core) descriptor with output dimensions
-    /// 4. Fill DPU descriptor (all post-processing bypassed for raw matmul)
-    /// 5. Call `gen_matul()` to pack everything into `npu_op()` commands
+    /// 步骤：
+    /// 1. 从 M、K、N 维度计算 CNA 描述符
+    /// 2. 计算 CBUF 存储体分配（特征 vs 权重）
+    /// 3. 用输出维度填充 MAC（核心）描述符
+    /// 4. 填充 DPU 描述符（对于原始矩阵乘法，所有后处理都被旁路）
+    /// 5. 调用 `gen_matul()` 将所有内容打包成 `npu_op()` 命令
     fn fill_regcmd(&self, regcmd: &mut [u64]) {
         let mut cna_desc = NpuCnaDesc::default();
         let mut core_desc = NpuCoreDesc::default();
@@ -466,10 +464,10 @@ impl MatMul<i8, i32> {
         Operation::MatMulu8(MatMul::new(m, k, n))
     }
 
-    /// Write matrix B into the DMA buffer in the NPU's 32×32 tiled layout.
+    /// 以 NPU 的 32×32 平铺布局将矩阵 B 写入 DMA 缓冲区。
     ///
-    /// The NPU stores i8 weights in 32×32 interleaved blocks for optimal
-    /// MAC throughput.  This converts from row-major `b[k*n]`.
+    /// NPU 以 32×32 交错块存储 i8 权重以获得最佳 MAC 吞吐量。
+    /// 这从行主序 `b[k*n]` 转换。
     pub fn set_b(&mut self, b: &[i8]) {
         assert_eq!(b.len(), self.k as usize * self.n as usize);
 
@@ -484,27 +482,27 @@ impl MatMul<i8, i32> {
         }
     }
 
-    /// Read one element C[m, n] from the output buffer, reversing the tile layout.
+    /// 从输出缓冲区读取一个元素 C[m, n]，反转平铺布局。
     pub fn get_output(&self, m: usize, n: usize) -> i32 {
         self.output
             .get(feature_data(self.n as _, self.m as _, 1, 4, n as _, m as _, 1) as usize)
             .unwrap()
     }
 
-    /// Raw output buffer (in NPU tiled layout, not row-major).
+    /// 原始输出缓冲区（采用 NPU 平铺布局，而非行主序）。
     pub fn output_buffer(&self) -> &[i32] {
         self.output.as_ref()
     }
 }
 
-/// Compute the byte offset of element (c, h, w) in the NPU's feature tiling.
+/// 计算 NPU 特征平铺中元素 (c, h, w) 的字节偏移量。
 ///
-/// The NPU stores feature maps in groups of `channel_group` channels.
-/// Within each group, elements are interleaved: for each spatial position
-/// (h, w) the `channel_group` channel values are stored contiguously.
+/// NPU 以 `channel_group` 个通道为一组存储特征图。
+/// 在每组内，元素是交错的：对于每个空间位置 (h, w)，
+/// `channel_group` 个通道值连续存储。
 ///
-/// For i8 data, `channel_group = 16`; for i32, `channel_group = 4`.
-/// All indices are **1-based** (matching the original C driver convention).
+/// 对于 i8 数据，`channel_group = 16`；对于 i32，`channel_group = 4`。
+/// 所有索引都是 **从 1 开始**（匹配原始 C 驱动约定）。
 fn feature_data(
     _channel: i32,
     height: i32,
@@ -521,12 +519,11 @@ fn feature_data(
     src_offset + channel_group * ((h - 1) * width + (w - 1)) + channel_offset
 }
 
-/// Compute the byte offset of weight element (kernel, channel) in the NPU's
-/// 32×32 block-interleaved i8 weight layout.
+/// 计算 NPU 的 32×32 块交错 i8 权重布局中权重元素 (kernel, channel) 的字节偏移量。
 ///
-/// Weights are stored in 32-kernel × 32-channel tiles.  Within each tile,
-/// channel varies fastest (inner dimension), kernel varies slowest.
-/// All indices are **1-based**.
+/// 权重以 32 个内核 × 32 个通道的平铺存储。在每个平铺内，
+/// 通道变化最快（内部维度），内核变化最慢。
+/// 所有索引都是 **从 1 开始**。
 fn weight_int8(channel: i32, kernel: i32, c: i32) -> i32 {
     let kernel_page = (kernel - 1) / 32;
     let channel_page = (c - 1) / 32;

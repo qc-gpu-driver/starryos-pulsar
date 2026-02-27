@@ -1,116 +1,115 @@
-//! Descriptor structs for the CNA, MAC (core), and PC pipeline stages.
+//! CNA、MAC（核心）和 PC 流水线阶段的描述符结构。
 //!
-//! These are **software-side** descriptions of what a single layer needs.
-//! The `matmul.rs` (or future `conv2d.rs`) code fills these structs from
-//! high-level parameters (M, K, N, precision, etc.), then `gen_matul()`
-//! packs them into 64-bit register commands via `npu_op()`.
+//! 这些是单层所需内容的**软件端**描述。
+//! `matmul.rs`（或未来的 `conv2d.rs`）代码从高级参数（M、K、N、精度等）填充这些结构，
+//! 然后 `gen_matul()` 通过 `npu_op()` 将它们打包成 64 位寄存器命令。
 //!
-//! # NPU pipeline recap
+//! # NPU 流水线回顾
 //!
 //! ```text
-//!  Input tensor                           Output tensor
+//!  输入张量                               输出张量
 //!      │                                       ▲
 //!      ▼                                       │
 //!  ┌───────┐   ┌───────┐   ┌───────┐   ┌──────┴──┐
 //!  │  CNA  │──►│  MAC  │──►│  DPU  │──►│  WDMA   │
-//!  │ (load │   │(compute)  │(post- │   │ (write  │
-//!  │ feat+ │   │ matmul/│   │ proc) │   │ result) │
-//!  │ weight)│   │ conv  │   │       │   │         │
+//!  │ (加载 │   │(计算)  │   │(后处  │   │ (写入   │
+//!  │ 特征+ │   │ 矩阵乘/│   │ 理)   │   │ 结果)   │
+//!  │ 权重) │   │ 卷积  │   │       │   │         │
 //!  └───────┘   └───────┘   └───────┘   └─────────┘
 //! ```
 
-/// CNA (Convolution Neural Accelerator) descriptor.
+/// CNA（卷积神经加速器）描述符。
 ///
-/// Configures **input feature loading** and **weight loading** for one layer.
-/// The hex comments (e.g. `// 0x100C`) indicate which MMIO register the
-/// field maps to — useful when cross-referencing the TRM.
+/// 为一层配置**输入特征加载**和**权重加载**。
+/// 十六进制注释（例如 `// 0x100C`）指示字段映射到哪个 MMIO 寄存器 — 
+/// 在交叉引用 TRM 时很有用。
 ///
-/// # Key concepts
+/// # 关键概念
 ///
-/// - **datain_***: dimensions of the input feature tensor (W×H×C)
-/// - **weight_***: dimensions and size of the weight/kernel tensor
-/// - **CBUF**: on-chip buffer shared between feature data and weights;
-///   `data_bank` + `weight_bank` must fit within `NPU_CBUF_BANKS` (12)
-/// - **feature_base_addr**: DMA bus address of the input tensor
-/// - **decompress_addr0**: DMA bus address of the weight tensor
-///   (named "decompress" because the HW can decompress on-the-fly)
-/// - **cvt_***: input data type conversion (scale/bypass)
-/// - **fc_***: fully-connected layer specific controls
+/// - **datain_***: 输入特征张量的维度（W×H×C）
+/// - **weight_***: 权重/内核张量的维度和大小
+/// - **CBUF**: 特征数据和权重之间共享的片上缓冲区；
+///   `data_bank` + `weight_bank` 必须适合 `NPU_CBUF_BANKS`（12）
+/// - **feature_base_addr**: 输入张量的 DMA 总线地址
+/// - **decompress_addr0**: 权重张量的 DMA 总线地址
+///   （命名为"decompress"是因为硬件可以即时解压缩）
+/// - **cvt_***: 输入数据类型转换（缩放/旁路）
+/// - **fc_***: 全连接层特定控制
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NpuCnaDesc {
     pub enable: u8,
-    pub conv_mode: u8,                // 0x100C — convolution mode (direct/winograd)
-    pub in_precision: u8,             // 0x100C — input data precision (Int8/FP16/…)
-    pub proc_precision: u8,           // 0x100C — processing precision
-    pub kernel_groups: u8,            // 0x1010 — number of kernel groups
-    pub feature_grains: u16,          // 0x1010 — feature data granularity
-    pub conv_y_stride: u8,            // 0x1014 — vertical stride
-    pub conv_x_stride: u8,            // 0x1014 — horizontal stride
-    pub datain_width: u16,            // 0x1020 — input feature width
-    pub datain_height: u16,           // 0x1020 — input feature height
-    pub datain_channel: u16,          // 0x1024 — input feature channels
-    pub dataout_width: u16,           // 0x1028 — output feature width
-    pub dataout_atomics: u32,         // 0x102C — output atomic count (W×H)
-    pub weight_bytes: u32,            // 0x1030 — total weight size in bytes
-    pub weight_bytes_per_kernel: u32, // 0x1034 — weight bytes per output channel
-    pub weight_width: u8,             // 0x1038 — kernel width
-    pub weight_height: u8,            // 0x1038 — kernel height
-    pub weight_kernels: u16,          // 0x1038 — number of output channels (N)
-    pub weight_bank: u8,              // 0x1040 — CBUF banks allocated for weights
-    pub data_bank: u8,                // 0x1040 — CBUF banks allocated for features
-    pub data_entries: u16,            // 0x1044 — feature entries in CBUF
-    pub data_sign: u8,                // 0x104c — signed/unsigned flag
-    pub cvt_type: u8,                 // 0x104c — conversion type
-    pub cvt_bypass: u8,               // 0x104c — bypass input conversion
-    pub cvt_scale0: u16,              // 0x1050 — channel group 0 scale
-    pub cvt_scale1: u16,              // 0x1054 — channel group 1 scale
-    pub cvt_scale2: u16,              // 0x1058 — channel group 2 scale
-    pub cvt_scale3: u16,              // 0x105C — channel group 3 scale
-    pub fc_skip_en: u8,               // 0x1060 — fully-connected skip enable
-    pub data_offset: u16,             // 0x1064 — data start offset
-    pub pad_left: u8,                 // 0x1068 — left zero-padding
-    pub pad_top: u8,                  // 0x1068 — top zero-padding
-    pub feature_base_addr: u32,       // 0x1070 — DMA address of input feature data
-    pub weight_offset: u16,           // 0x1074 — weight start offset
-    pub weight_burst_len: u8,         // 0x1078 — AXI burst length for weight DMA
-    pub data_burst_len: u8,           // 0x1078 — AXI burst length for feature DMA
-    pub line_stride: u32,             // 0x107C — bytes between consecutive lines
-    pub surf_stride: i32,             // 0x1080 — bytes between channel surfaces
-    pub dma_width: u16,               // 0x1084 — DMA transfer width
-    pub dma_height: u16,              // 0x1084 — DMA transfer height
-    pub dma_channel: u16,             // 0x1088 — DMA transfer channels
-    pub decompress_addr0: u32,        // 0x1110 — DMA address of weight data
+    pub conv_mode: u8,                // 0x100C — 卷积模式（直接/winograd）
+    pub in_precision: u8,             // 0x100C — 输入数据精度（Int8/FP16/…）
+    pub proc_precision: u8,           // 0x100C — 处理精度
+    pub kernel_groups: u8,            // 0x1010 — 内核组数
+    pub feature_grains: u16,          // 0x1010 — 特征数据粒度
+    pub conv_y_stride: u8,            // 0x1014 — 垂直步长
+    pub conv_x_stride: u8,            // 0x1014 — 水平步长
+    pub datain_width: u16,            // 0x1020 — 输入特征宽度
+    pub datain_height: u16,           // 0x1020 — 输入特征高度
+    pub datain_channel: u16,          // 0x1024 — 输入特征通道数
+    pub dataout_width: u16,           // 0x1028 — 输出特征宽度
+    pub dataout_atomics: u32,         // 0x102C — 输出原子计数（W×H）
+    pub weight_bytes: u32,            // 0x1030 — 权重总大小（字节）
+    pub weight_bytes_per_kernel: u32, // 0x1034 — 每个输出通道的权重字节数
+    pub weight_width: u8,             // 0x1038 — 内核宽度
+    pub weight_height: u8,            // 0x1038 — 内核高度
+    pub weight_kernels: u16,          // 0x1038 — 输出通道数（N）
+    pub weight_bank: u8,              // 0x1040 — 为权重分配的 CBUF 存储体
+    pub data_bank: u8,                // 0x1040 — 为特征分配的 CBUF 存储体
+    pub data_entries: u16,            // 0x1044 — CBUF 中的特征条目
+    pub data_sign: u8,                // 0x104c — 有符号/无符号标志
+    pub cvt_type: u8,                 // 0x104c — 转换类型
+    pub cvt_bypass: u8,               // 0x104c — 旁路输入转换
+    pub cvt_scale0: u16,              // 0x1050 — 通道组 0 缩放
+    pub cvt_scale1: u16,              // 0x1054 — 通道组 1 缩放
+    pub cvt_scale2: u16,              // 0x1058 — 通道组 2 缩放
+    pub cvt_scale3: u16,              // 0x105C — 通道组 3 缩放
+    pub fc_skip_en: u8,               // 0x1060 — 全连接跳过使能
+    pub data_offset: u16,             // 0x1064 — 数据起始偏移量
+    pub pad_left: u8,                 // 0x1068 — 左侧零填充
+    pub pad_top: u8,                  // 0x1068 — 顶部零填充
+    pub feature_base_addr: u32,       // 0x1070 — 输入特征数据的 DMA 地址
+    pub weight_offset: u16,           // 0x1074 — 权重起始偏移量
+    pub weight_burst_len: u8,         // 0x1078 — 权重 DMA 的 AXI 突发长度
+    pub data_burst_len: u8,           // 0x1078 — 特征 DMA 的 AXI 突发长度
+    pub line_stride: u32,             // 0x107C — 连续行之间的字节数
+    pub surf_stride: i32,             // 0x1080 — 通道表面之间的字节数
+    pub dma_width: u16,               // 0x1084 — DMA 传输宽度
+    pub dma_height: u16,              // 0x1084 — DMA 传输高度
+    pub dma_channel: u16,             // 0x1088 — DMA 传输通道数
+    pub decompress_addr0: u32,        // 0x1110 — 权重数据的 DMA 地址
     pub dataout_height: u16,
 }
 
-/// MAC (Multiply-Accumulate Core) descriptor.
+/// MAC（乘累加核心）描述符。
 ///
-/// The MAC unit does the actual matrix multiply / convolution computation.
-/// Its config is relatively simple — mainly output dimensions and precision.
-/// The heavy lifting (input routing) is handled by CNA.
+/// MAC 单元执行实际的矩阵乘法/卷积计算。
+/// 其配置相对简单 — 主要是输出维度和精度。
+/// 繁重的工作（输入路由）由 CNA 处理。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NpuCoreDesc {
-    pub proc_precision: u8,   // 0x3010 — compute precision
-    pub qd_en: u8,            // 0x3010 — quantize/dequantize enable
-    pub dataout_height: u16,  // 0x3014 — output height (0-indexed: actual-1)
-    pub dataout_width: u16,   // 0x3014 — output width  (0-indexed: actual-1)
-    pub dataout_channel: u16, // 0x3018 — output channels (0-indexed: actual-1)
+    pub proc_precision: u8,   // 0x3010 — 计算精度
+    pub qd_en: u8,            // 0x3010 — 量化/反量化使能
+    pub dataout_height: u16,  // 0x3014 — 输出高度（0 索引：实际值-1）
+    pub dataout_width: u16,   // 0x3014 — 输出宽度（0 索引：实际值-1）
+    pub dataout_channel: u16, // 0x3018 — 输出通道数（0 索引：实际值-1）
 }
 
-/// PC (Program Counter) descriptor — rarely filled manually.
+/// PC（程序计数器）描述符 — 很少手动填充。
 ///
-/// The PC module is usually programmed directly by `submit_pc()` in the
-/// register layer, not through this struct.
+/// PC 模块通常由寄存器层中的 `submit_pc()` 直接编程，
+/// 而不是通过此结构。
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NpuPcDesc {
-    pub pc_source_addr: u32, // 0x0010 — regcmd buffer base address
-    pub pc_data_amount: u32, // 0x0014 — number of regcmd words per task
+    pub pc_source_addr: u32, // 0x0010 — regcmd 缓冲区基地址
+    pub pc_data_amount: u32, // 0x0014 — 每个任务的 regcmd 字数
 }
 
-/// Raw 64-bit register command array for one CNA+MAC task (112 entries).
+/// 一个 CNA+MAC 任务的原始 64 位寄存器命令数组（112 个条目）。
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct NpuCnaCoreTask {

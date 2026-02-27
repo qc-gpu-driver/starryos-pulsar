@@ -6,6 +6,7 @@
     - [第一周](./develop_log/第一周/log.md)
     - [第二周](./develop_log/第二周/log.md)
     - [第三周](./develop_log/第三周/log.md)
+    - [第五周](./develop_log/第五周/log.md)
 - [项目文档](./documents/docs.md)
     - [rknn手册](./documents/rknn-manual.md)
         - [rknn硬件手册](./documents/rknn-hardware.md)

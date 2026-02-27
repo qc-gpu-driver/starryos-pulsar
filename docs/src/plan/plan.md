@@ -35,18 +35,18 @@
     - [x] 配置 `Cargo.toml` 依赖。
 - [x] **NPU探测**
     - [x] 实现 FDT (设备树) 解析，获取 NPU 寄存器基地址和中断号。
-- [ ] **电源域管理 (Power Domain)**
-    - [ ] 对接 PMU 驱动，按顺序开启 NPU 电源域：
-        - [ ] `NPUTOP`
-        - [ ] `NPU0` (Core 0)
-        - [ ] `NPU1` (Core 1)
+- [x] **电源域管理 (Power Domain)**
+    - [x] 对接 PMU 驱动，按顺序开启 NPU 电源域：
+        - [x] `NPUTOP`
+        - [x] `NPU0` (Core 0)
+        - [x] `NPU1` (Core 1)
         - [ ] `NPU2` (Core 2)
 
 ### 3. 用户态接口适配 (DRM)
 
 - [ ] **DRM 框架（StarryOS 主线）**
-    - [x] **DRM ioctl 基础解析**
-        - [x] 实现 ioctl 编码解析：`ioctl_nr` / `is_driver_ioctl` / `io_size`
+    - [ ] **DRM ioctl 基础解析**
+        - [ ] 实现 ioctl 编码解析：`ioctl_nr` / `is_driver_ioctl` / `io_size`
     - [ ] **设备节点与基础握手**
         - [ ] `/dev/dri/card0`：实现 `DRM_IOCTL_VERSION`，返回 Rockchip 相关信息以通过初始化探测
         - [ ] `/dev/dri/card1`：实现 `DRM_IOCTL_VERSION`，driver name 为 `rknpu`
