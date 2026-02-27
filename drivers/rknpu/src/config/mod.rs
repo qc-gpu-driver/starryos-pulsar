@@ -1,7 +1,7 @@
-//! RKNPU configuration bindings translated from the C `struct rknpu_config`.
+//! 从 C 语言 `struct rknpu_config` 翻译而来的 RKNPU 配置绑定。
 //!
-//! This module provides a `#[repr(C)]` Rust equivalent suitable for FFI
-//! or direct translation of kernel-style configuration data.
+//! 本模块提供了 `#[repr(C)]` 的 Rust 等价结构，适用于 FFI
+//! 或直接翻译内核风格的配置数据。
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RknpuType {

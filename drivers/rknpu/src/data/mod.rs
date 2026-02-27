@@ -1,29 +1,26 @@
-//! Chip-variant configuration data for different Rockchip NPU silicon.
+//! 不同瑞芯微 NPU 芯片的变体配置数据。
 //!
-//! # Why this exists
+//! # 为什么需要这个模块
 //!
-//! Different SoCs (RK3588, RK3568, …) have the same NPU IP but with
-//! different parameters: number of cores, DMA address width, PC register
-//! encoding quirks, bandwidth priority addresses, etc.
+//! 不同的 SoC（RK3588、RK3568 等）拥有相同的 NPU IP，但参数不同：
+//! 核心数量、DMA 地址宽度、PC 寄存器编码特性、带宽优先级地址等。
 //!
-//! [`RknpuData`] captures all these chip-specific constants so the rest of
-//! the driver can be written generically.  When a new SoC is added, only
-//! a new constructor (like `new_3588()`) is needed.
+//! [`RknpuData`] 捕获所有这些芯片特定的常量，使驱动的其余部分可以通用编写。
+//! 添加新 SoC 时，只需要一个新的构造函数（如 `new_3588()`）。
 //!
-//! # How it's used
+//! # 如何使用
 //!
-//! - `Rknpu::new()` calls `RknpuData::new(config.rknpu_type)` to get the
-//!   correct parameters.
-//! - `submit_pc()` reads `pc_data_amount_scale`, `pc_task_number_bits`, etc.
-//!   to encode the PC register values correctly for the target chip.
-//! - `clear_rw_amount()` uses `amount_top` / `amount_core` offsets.
+//! - `Rknpu::new()` 调用 `RknpuData::new(config.rknpu_type)` 获取正确的参数。
+//! - `submit_pc()` 读取 `pc_data_amount_scale`、`pc_task_number_bits` 等，
+//!   为目标芯片正确编码 PC 寄存器值。
+//! - `clear_rw_amount()` 使用 `amount_top` / `amount_core` 偏移量。
 
 use core::fmt::Debug;
 
 use crate::{Rknpu, RknpuError, RknpuType};
 
-/// Returns a mask with the lowest `n` bits set.
-/// e.g. `dma_bit_mask(40)` → 0xFF_FFFF_FFFF (40-bit address space).
+/// 返回最低 `n` 位被设置的掩码。
+/// 例如 `dma_bit_mask(40)` → 0xFF_FFFF_FFFF（40 位地址空间）。
 pub(crate) const fn dma_bit_mask(n: u32) -> u64 {
     if n >= 64 {
         u64::MAX
@@ -32,91 +29,90 @@ pub(crate) const fn dma_bit_mask(n: u32) -> u64 {
     }
 }
 
-/// Register offsets for reading hardware R/W byte-count statistics.
+/// 用于读取硬件读/写字节计数统计的寄存器偏移量。
 ///
-/// Some NPU variants expose counters that track how many bytes the NPU
-/// has read/written — useful for bandwidth profiling.
+/// 某些 NPU 变体公开了跟踪 NPU 读/写字节数的计数器 — 对带宽分析很有用。
 #[derive(Copy, Clone, Debug, Default)]
 pub struct RknpuAmountData {
-    /// Register offset to clear all counters.
+    /// 清除所有计数器的寄存器偏移量。
     pub offset_clr_all: u16,
-    /// Register offset to read "data written" counter.
+    /// 读取"数据写入"计数器的寄存器偏移量。
     pub offset_dt_wr: u16,
-    /// Register offset to read "data read" counter.
+    /// 读取"数据读取"计数器的寄存器偏移量。
     pub offset_dt_rd: u16,
-    /// Register offset to read "weight read" counter.
+    /// 读取"权重读取"计数器的寄存器偏移量。
     pub offset_wt_rd: u16,
 }
 
-/// Chip-variant parameters that differ between NPU silicon revisions.
+/// NPU 芯片版本之间不同的芯片变体参数。
 ///
-/// The register layer (`registers/mod.rs`) and submission code (`ioctrl.rs`)
-/// consult these values to correctly encode PC commands.
+/// 寄存器层（`registers/mod.rs`）和提交代码（`ioctrl.rs`）
+/// 查询这些值以正确编码 PC 命令。
 #[derive(Debug, Clone)]
 pub(crate) struct RknpuData {
-    /// MMIO address of the bandwidth priority register block.
+    /// 带宽优先级寄存器块的 MMIO 地址。
     pub bw_priority_addr: u32,
-    /// Length (in bytes) of the bandwidth priority register block.
+    /// 带宽优先级寄存器块的长度（字节）。
     pub bw_priority_length: u32,
-    /// Maximum DMA address the NPU can reach (e.g. 40-bit → 1 TB).
+    /// NPU 可以访问的最大 DMA 地址（例如 40 位 → 1 TB）。
     pub dma_mask: u64,
-    /// Divider for the PC REGISTER_AMOUNTS field.
-    /// RK3588 uses 2 (each "amount" unit = 2 regcmd words).
+    /// PC REGISTER_AMOUNTS 字段的除数。
+    /// RK3588 使用 2（每个"amount"单位 = 2 个 regcmd 字）。
     pub pc_data_amount_scale: u32,
-    /// Bit width of the task-number field inside TASK_CON register.
-    /// RK3588 = 12 bits → max 4095 tasks per submission.
+    /// TASK_CON 寄存器内任务编号字段的位宽。
+    /// RK3588 = 12 位 → 每次提交最多 4095 个任务。
     pub pc_task_number_bits: u32,
-    /// Bitmask for extracting the task number (e.g. 0xFFF for 12 bits).
+    /// 提取任务编号的位掩码（例如 12 位为 0xFFF）。
     pub pc_task_number_mask: u32,
-    /// Register offset where the PC reports task completion status.
+    /// PC 报告任务完成状态的寄存器偏移量。
     pub pc_task_status_offset: u32,
-    /// Non-zero if the PC has DMA control (older chips).
+    /// 如果 PC 具有 DMA 控制则非零（较旧的芯片）。
     pub pc_dma_ctrl: u32,
-    /// Physical address of NPU-local SRAM buffer (0 if none).
+    /// NPU 本地 SRAM 缓冲区的物理地址（如果没有则为 0）。
     pub nbuf_phyaddr: u64,
-    /// Size (bytes) of NPU-local SRAM buffer.
+    /// NPU 本地 SRAM 缓冲区的大小（字节）。
     pub nbuf_size: u64,
-    /// Maximum number of tasks the PC can accept in one batch.
+    /// PC 在一批中可以接受的最大任务数。
     pub max_submit_number: u64,
-    /// Bitmask of available cores (e.g. 0x7 = cores 0, 1, 2).
+    /// 可用核心的位掩码（例如 0x7 = 核心 0、1、2）。
     pub core_mask: u32,
-    /// Static IRQ descriptor table (one entry per core).
+    /// 静态 IRQ 描述符表（每个核心一个条目）。
     pub irqs: &'static [NpuIrq],
-    /// Offsets for top-level R/W amount counters (None if unsupported).
+    /// 顶层读/写量计数器的偏移量（如果不支持则为 None）。
     pub amount_top: Option<RknpuAmountData>,
-    /// Offsets for per-core R/W amount counters (None if unsupported).
+    /// 每核心读/写量计数器的偏移量（如果不支持则为 None）。
     pub amount_core: Option<RknpuAmountData>,
-    /// Platform-specific state initialization function.
+    /// 平台特定的状态初始化函数。
     pub state_init: Option<fn(&mut dyn core::any::Any) -> Result<(), RknpuError>>,
-    /// Cache scatter-gather table initialization.
+    /// 缓存散列表初始化。
     pub cache_sgt_init: Option<fn(&mut dyn core::any::Any) -> Result<(), RknpuError>>,
 }
 
 impl RknpuData {
-    /// Select the correct chip-variant parameters.
+    /// 选择正确的芯片变体参数。
     pub fn new(ty: RknpuType) -> Self {
         match ty {
             RknpuType::Rk3588 => Self::new_3588(),
         }
     }
 
-    /// RK3588 NPU: 3 cores, 40-bit DMA, 12-bit task numbers.
+    /// RK3588 NPU：3 个核心、40 位 DMA、12 位任务编号。
     fn new_3588() -> Self {
         Self {
             bw_priority_addr: 0x0,
             bw_priority_length: 0x0,
-            dma_mask: dma_bit_mask(40),         // 40-bit → 1 TB address space
-            pc_data_amount_scale: 2,             // each amount unit = 2 regcmd u64s
-            pc_task_number_bits: 12,             // TASK_CON[11:0] = task count
+            dma_mask: dma_bit_mask(40),         // 40 位 → 1 TB 地址空间
+            pc_data_amount_scale: 2,             // 每个 amount 单位 = 2 个 regcmd u64
+            pc_task_number_bits: 12,             // TASK_CON[11:0] = 任务计数
             pc_task_number_mask: 0xfff,
-            pc_task_status_offset: 0x3c,         // TASK_STATUS register offset
-            pc_dma_ctrl: 0,                      // no legacy DMA control
-            irqs: RK3588_IRQS,                   // 3 IRQs, one per core
+            pc_task_status_offset: 0x3c,         // TASK_STATUS 寄存器偏移量
+            pc_dma_ctrl: 0,                      // 无传统 DMA 控制
+            irqs: RK3588_IRQS,                   // 3 个 IRQ，每个核心一个
             nbuf_phyaddr: 0,
             nbuf_size: 0,
-            max_submit_number: (1u64 << 12) - 1, // 4095 tasks max
-            core_mask: 0x7,                       // cores 0, 1, 2 all present
-            amount_top: None,                     // RW counters not yet wired
+            max_submit_number: (1u64 << 12) - 1, // 最多 4095 个任务
+            core_mask: 0x7,                       // 核心 0、1、2 全部存在
+            amount_top: None,                     // 读写计数器尚未连接
             amount_core: None,
             state_init: None,
             cache_sgt_init: None,
@@ -124,7 +120,7 @@ impl RknpuData {
     }
 }
 
-/// Static IRQ table for the RK3588 — one interrupt line per NPU core.
+/// RK3588 的静态 IRQ 表 — 每个 NPU 核心一条中断线。
 const RK3588_IRQS: &[NpuIrq] = &[
     NpuIrq {
         name: "npu0_irq",
@@ -140,11 +136,11 @@ const RK3588_IRQS: &[NpuIrq] = &[
     },
 ];
 
-/// Interrupt descriptor for one NPU core.
+/// 一个 NPU 核心的中断描述符。
 pub struct NpuIrq {
-    /// Human-readable name (matches device-tree interrupt name).
+    /// 人类可读的名称（与设备树中断名称匹配）。
     pub name: &'static str,
-    /// Handler callback invoked when this core's interrupt fires.
+    /// 当此核心的中断触发时调用的处理程序回调。
     pub irq_hdl: fn(&mut Rknpu, irq: usize) -> Option<()>,
 }
 

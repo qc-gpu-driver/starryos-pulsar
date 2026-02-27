@@ -104,7 +104,8 @@ typedef struct {
     int in_use;
 } NPUBuffer;
 
-#define MAX_BUFFER_POOL_SIZE 8
+#define MAX_BUFFER_POOL_SIZE 12
+#define NPU_MAX_CORES 3
 #endif
 
 typedef struct {
@@ -118,13 +119,14 @@ typedef struct {
 #if USE_NPU
     // NPU resources
     int npu_fd;
-    uint64_t regcmd_dma, regcmd_obj;
-    uint32_t regcmd_handle;
-    uint64_t *regcmd;
+    // Per-core regcmd buffers for multi-core parallel submission
+    uint64_t regcmd_dma[NPU_MAX_CORES], regcmd_obj[NPU_MAX_CORES];
+    uint32_t regcmd_handle[NPU_MAX_CORES];
+    uint64_t *regcmd[NPU_MAX_CORES];
     uint64_t tasks_dma, tasks_obj;
     uint32_t tasks_handle;
     struct rknpu_task *tasks;
-    uint64_t npu_regs[112];
+    uint64_t npu_regs[NPU_MAX_CORES][112];
     
     // Statistics
     int npu_calls;
@@ -300,7 +302,11 @@ void init_buffer_pool(Transformer* t) {
         256 * 1024,       // 256KB
         256 * 1024,       // 256KB (duplicate)
         128 * 1024,       // 128KB
-        128 * 1024        // 128KB (duplicate)
+        128 * 1024,       // 128KB (duplicate)
+        512 * 1024,       // 512KB (3-core Q)
+        512 * 1024,       // 512KB (3-core K)
+        256 * 1024,       // 256KB (3-core V)
+        256 * 1024        // 256KB (3-core V dup)
     };
     
     int successful = 0;
@@ -376,19 +382,28 @@ void build_transformer(Transformer *t, char* checkpoint_path) {
         return;
     }
     
-    // Allocate NPU control structures
-    t->regcmd = mem_allocate(t->npu_fd, 1024, &t->regcmd_dma, &t->regcmd_obj, 0, &t->regcmd_handle);
-    t->tasks = mem_allocate(t->npu_fd, 1024, &t->tasks_dma, &t->tasks_obj, 
+    // Allocate NPU control structures — one regcmd buffer per core
+    int alloc_ok = 1;
+    for (int c = 0; c < NPU_MAX_CORES; c++) {
+        t->regcmd[c] = mem_allocate(t->npu_fd, 1024,
+                                    &t->regcmd_dma[c], &t->regcmd_obj[c],
+                                    0, &t->regcmd_handle[c]);
+        if (!t->regcmd[c]) { alloc_ok = 0; break; }
+    }
+    t->tasks = mem_allocate(t->npu_fd, 4096, &t->tasks_dma, &t->tasks_obj, 
                            RKNPU_MEM_KERNEL_MAPPING, &t->tasks_handle);
     
-    if (t->regcmd == NULL || t->tasks == NULL) {
+    if (!alloc_ok || t->tasks == NULL) {
         fprintf(stderr, "Warning: Failed to allocate NPU memory, will use CPU only\n");
-        if (t->regcmd) {
-            munmap(t->regcmd, 1024);
-            mem_destroy(t->npu_fd, t->regcmd_handle, t->regcmd_obj);
+        for (int c = 0; c < NPU_MAX_CORES; c++) {
+            if (t->regcmd[c]) {
+                munmap(t->regcmd[c], 1024);
+                mem_destroy(t->npu_fd, t->regcmd_handle[c], t->regcmd_obj[c]);
+                t->regcmd[c] = NULL;
+            }
         }
         if (t->tasks) {
-            munmap(t->tasks, 1024);
+            munmap(t->tasks, 4096);
             mem_destroy(t->npu_fd, t->tasks_handle, t->tasks_obj);
         }
         npu_close(t->npu_fd);
@@ -530,12 +545,14 @@ void free_transformer(Transformer* t) {
             free_buffer_pool(t);
         }
         
-        if (t->regcmd != NULL) {
-            munmap(t->regcmd, 1024);
-            mem_destroy(t->npu_fd, t->regcmd_handle, t->regcmd_obj);
+        for (int c = 0; c < NPU_MAX_CORES; c++) {
+            if (t->regcmd[c] != NULL) {
+                munmap(t->regcmd[c], 1024);
+                mem_destroy(t->npu_fd, t->regcmd_handle[c], t->regcmd_obj[c]);
+            }
         }
         if (t->tasks != NULL) {
-            munmap(t->tasks, 1024);
+            munmap(t->tasks, 4096);
             mem_destroy(t->npu_fd, t->tasks_handle, t->tasks_obj);
         }
         npu_close(t->npu_fd);
@@ -712,14 +729,14 @@ int matmul_npu_cached(Transformer* t, float* xout, float* x, NPUWeightCache* wei
     params.input_dma = input_dma;
     params.weights_dma = weights_dma;
     params.output_dma = output_dma;
-    params.tasks = (uint64_t *)&t->npu_regs;
+    params.tasks = (uint64_t *)&t->npu_regs[0];
     params.fp32tofp16 = 0;
     
     if (gen_matmul_fp16(&params) != 0) {
         goto cleanup_error;
     }
     
-    memcpy(t->regcmd, t->npu_regs, sizeof(t->npu_regs));
+    memcpy(t->regcmd[0], t->npu_regs[0], sizeof(t->npu_regs[0]));
     
     // Setup task
     t->tasks[0].flags = 0;
@@ -728,11 +745,11 @@ int matmul_npu_cached(Transformer* t, float* xout, float* x, NPUWeightCache* wei
     t->tasks[0].int_mask = 0x300;
     t->tasks[0].int_clear = 0x1ffff;
     t->tasks[0].int_status = 0;
-    t->tasks[0].regcfg_amount = sizeof(t->npu_regs)/sizeof(uint64_t)-(RKNPU_PC_DATA_EXTRA_AMOUNT+4);
+    t->tasks[0].regcfg_amount = sizeof(t->npu_regs[0])/sizeof(uint64_t)-(RKNPU_PC_DATA_EXTRA_AMOUNT+4);
     t->tasks[0].regcfg_offset = 0;
-    t->tasks[0].regcmd_addr = t->regcmd_dma;
+    t->tasks[0].regcmd_addr = t->regcmd_dma[0];
     
-    // Submit to NPU
+    // Submit to NPU (single core)
     struct rknpu_submit submit = {
         .flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG,
         .timeout = 6000,
@@ -744,11 +761,11 @@ int matmul_npu_cached(Transformer* t, float* xout, float* x, NPUWeightCache* wei
         .regcfg_obj_addr = 0,
         .task_base_addr = 0,
         .user_data = 0,
-        .core_mask = 1,
+        .core_mask = 0x1,
         .fence_fd = -1,
         .subcore_task = {
             { .task_start = 0, .task_number = 1 },
-            { 1, 0 }, { 2, 0 }, { 0, 0 }, { 0, 0 }
+            { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }
         },
     };
     
@@ -800,6 +817,198 @@ cleanup_error:
         mem_destroy(t->npu_fd, output_handle, output_obj);
     }
     t->npu_fallback++;
+    return -1;
+}
+
+// 3-core parallel QKV matmul: submits Q, K, V to 3 NPU cores simultaneously
+int matmul_npu_3core_qkv(Transformer* t, float* xout_q, float* xout_k, float* xout_v,
+                          float* x, int layer_idx) {
+    if (!t->weight_cache.enabled) { fprintf(stderr, "[3core] cache disabled\n"); return -1; }
+
+    NPUWeightCache* caches[3] = {
+        &t->weight_cache.wq_cache[layer_idx],
+        &t->weight_cache.wk_cache[layer_idx],
+        &t->weight_cache.wv_cache[layer_idx],
+    };
+    float* xouts[3] = { xout_q, xout_k, xout_v };
+    int dims[3];  // M (output dim) for each matmul
+
+    int dim = t->config.dim;
+    int kv_dim = (dim * t->config.n_kv_heads) / t->config.n_heads;
+    dims[0] = dim;      // wq: dim x dim
+    dims[1] = kv_dim;   // wk: kv_dim x dim
+    dims[2] = kv_dim;   // wv: kv_dim x dim
+    int K = dim;        // shared input dimension
+    int N = 16;
+
+    // Validate all 3 caches exist and dimensions are NPU-compatible
+    for (int c = 0; c < 3; c++) {
+        if (!caches[c] || !caches[c]->is_cached) { fprintf(stderr, "[3core] cache[%d] not ready\n", c); return -1; }
+        int d = dims[c];
+        if (d != 1 && (d % 4 != 0 || d > 544)) { fprintf(stderr, "[3core] dim check fail: core=%d d=%d\n", c, d); return -1; }
+    }
+    if (K % 32 != 0 || K > 4096) { fprintf(stderr, "[3core] K check fail: K=%d\n", K); return -1; }
+
+    t->npu_calls += 3;
+
+    // Per-core DMA buffers
+    NPUBuffer *input_bufs[3] = {0}, *weights_bufs[3] = {0}, *output_bufs[3] = {0};
+    void *inputs[3], *weights[3], *outputs[3];
+    uint64_t input_dmas[3], weights_dmas[3], output_dmas[3];
+    int use_pool[3] = {0};
+
+    // Allocate buffers for each core
+    for (int c = 0; c < 3; c++) {
+        int M = dims[c];
+        int K_padded = ((K + 31) / 32) * 32;
+        size_t input_size = M * K * sizeof(_Float16);
+        size_t weights_size = ((K_padded + 31) / 32) * 32 * 16 * sizeof(_Float16);
+        size_t output_size = M * N * sizeof(float);
+
+        input_bufs[c] = get_buffer_from_pool(t, input_size);
+        weights_bufs[c] = get_buffer_from_pool(t, weights_size);
+        output_bufs[c] = get_buffer_from_pool(t, output_size);
+
+        if (input_bufs[c] && weights_bufs[c] && output_bufs[c]) {
+            inputs[c] = input_bufs[c]->data;
+            input_dmas[c] = input_bufs[c]->dma;
+            weights[c] = weights_bufs[c]->data;
+            weights_dmas[c] = weights_bufs[c]->dma;
+            outputs[c] = output_bufs[c]->data;
+            output_dmas[c] = output_bufs[c]->dma;
+            use_pool[c] = 1;
+        } else {
+            // Pool exhausted for this core, fallback to single-core path
+            fprintf(stderr, "[3core] pool exhausted at core=%d input=%p weights=%p output=%p (need %zu %zu %zu)\n",
+                    c, (void*)input_bufs[c], (void*)weights_bufs[c], (void*)output_bufs[c],
+                    input_size, weights_size, output_size);
+            if (input_bufs[c]) release_buffer_to_pool(input_bufs[c]);
+            if (weights_bufs[c]) release_buffer_to_pool(weights_bufs[c]);
+            if (output_bufs[c]) release_buffer_to_pool(output_bufs[c]);
+            // Release previously allocated buffers
+            for (int j = 0; j < c; j++) {
+                if (use_pool[j]) {
+                    release_buffer_to_pool(input_bufs[j]);
+                    release_buffer_to_pool(weights_bufs[j]);
+                    release_buffer_to_pool(output_bufs[j]);
+                }
+            }
+            return -1;  // Caller will fall back to serial single-core
+        }
+    }
+
+    // Fill data and generate register commands for each core
+    for (int c = 0; c < 3; c++) {
+        int M = dims[c];
+        int K_padded = ((K + 31) / 32) * 32;
+        size_t weights_size = ((K_padded + 31) / 32) * 32 * 16 * sizeof(_Float16);
+
+        // Copy cached weight data (feature/input in NPU terms)
+        memcpy(inputs[c], caches[c]->data, caches[c]->size);
+
+        // Convert input vector x to NPU weight layout
+        _Float16 *weights_fp16 = weights[c];
+        for (int n_idx = 1; n_idx <= N; n_idx++) {
+            for (int k = 1; k <= K; k++) {
+                int src_idx = k - 1;
+                int dst_idx = weight_fp16(K, n_idx, k);
+                if (src_idx < K && dst_idx >= 0 && dst_idx < (int)(weights_size / sizeof(_Float16))) {
+                    weights_fp16[dst_idx] = (_Float16)x[src_idx];
+                } else {
+                    goto qkv_cleanup_error;
+                }
+            }
+        }
+
+        // Generate register commands for this core
+        matmul_params_t params;
+        params.m = M;
+        params.k = K;
+        params.n = N;
+        params.input_dma = input_dmas[c];
+        params.weights_dma = weights_dmas[c];
+        params.output_dma = output_dmas[c];
+        params.tasks = (uint64_t *)&t->npu_regs[c];
+        params.fp32tofp16 = 0;
+
+        if (gen_matmul_fp16(&params) != 0) {
+            goto qkv_cleanup_error;
+        }
+
+        // Copy to per-core DMA regcmd buffer
+        memcpy(t->regcmd[c], t->npu_regs[c], sizeof(t->npu_regs[c]));
+
+        // Setup task descriptor for this core
+        t->tasks[c].flags = 0;
+        t->tasks[c].op_idx = 0;
+        t->tasks[c].enable_mask = 0xd;
+        t->tasks[c].int_mask = 0x300;
+        t->tasks[c].int_clear = 0x1ffff;
+        t->tasks[c].int_status = 0;
+        t->tasks[c].regcfg_amount = sizeof(t->npu_regs[0])/sizeof(uint64_t)-(RKNPU_PC_DATA_EXTRA_AMOUNT+4);
+        t->tasks[c].regcfg_offset = 0;
+        t->tasks[c].regcmd_addr = t->regcmd_dma[c];
+    }
+
+    // Submit all 3 tasks to 3 cores in one ioctl
+    struct rknpu_submit submit = {
+        .flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG,
+        .timeout = 6000,
+        .task_start = 0,
+        .task_number = 3,
+        .task_counter = 0,
+        .priority = 0,
+        .task_obj_addr = t->tasks_obj,
+        .regcfg_obj_addr = 0,
+        .task_base_addr = 0,
+        .user_data = 0,
+        .core_mask = 0x7,
+        .fence_fd = -1,
+        .subcore_task = {
+            { .task_start = 0, .task_number = 1 },
+            { .task_start = 1, .task_number = 1 },
+            { .task_start = 2, .task_number = 1 },
+            { 0, 0 }, { 0, 0 }
+        },
+    };
+
+    if (ioctl(t->npu_fd, DRM_IOCTL_RKNPU_SUBMIT, &submit) < 0) {
+        goto qkv_cleanup_error;
+    }
+
+    // Copy results back for each core
+    for (int c = 0; c < 3; c++) {
+        int M = dims[c];
+        float *output_data = (float *)outputs[c];
+        for (int m = 1; m <= M; m++) {
+            int dst_idx = m - 1;
+            int src_idx = feature_data(N, M, 1, 4, 1, m, 1);
+            if (dst_idx < dims[c] && src_idx >= 0 && src_idx < M * N) {
+                xouts[c][dst_idx] = output_data[src_idx];
+            } else {
+                goto qkv_cleanup_error;
+            }
+        }
+    }
+
+    // Cleanup
+    for (int c = 0; c < 3; c++) {
+        release_buffer_to_pool(input_bufs[c]);
+        release_buffer_to_pool(weights_bufs[c]);
+        release_buffer_to_pool(output_bufs[c]);
+    }
+    t->npu_success += 3;
+    return 0;
+
+qkv_cleanup_error:
+    for (int c = 0; c < 3; c++) {
+        if (use_pool[c]) {
+            if (input_bufs[c]) release_buffer_to_pool(input_bufs[c]);
+            if (weights_bufs[c]) release_buffer_to_pool(weights_bufs[c]);
+            if (output_bufs[c]) release_buffer_to_pool(output_bufs[c]);
+        }
+    }
+    t->npu_fallback += 3;
     return -1;
 }
 
@@ -905,10 +1114,8 @@ float* forward(Transformer* transformer, int token, int pos) {
         s->k = s->key_cache + loff + pos * kv_dim;
         s->v = s->value_cache + loff + pos * kv_dim;
 
-        // OPTIMIZATION: qkv matmuls with cached weights
-        matmul_layer(transformer, s->q, s->xb, w->wq + l*dim*dim, dim, dim, l, "wq");
-        matmul_layer(transformer, s->k, s->xb, w->wk + l*dim*kv_dim, dim, kv_dim, l, "wk");
-        matmul_layer(transformer, s->v, s->xb, w->wv + l*dim*kv_dim, dim, kv_dim, l, "wv");
+        // 3-core parallel QKV (no fallback)
+        matmul_npu_3core_qkv(transformer, s->q, s->k, s->v, s->xb, l);
 
         // RoPE relative positional encoding
         for (int i = 0; i < dim; i+=2) {
