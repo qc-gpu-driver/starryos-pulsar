@@ -29,7 +29,6 @@ impl_trait! {
         }
 
         /// Busy-wait for the given duration by calling into `axhal`.
-        ///
         /// Short delays are serviced by the hardware abstraction layer's
         /// busy-wait implementation. This is suitable for small spin waits
         /// but should not be used for long sleeps.

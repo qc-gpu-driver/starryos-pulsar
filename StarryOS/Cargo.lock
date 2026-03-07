@@ -363,6 +363,7 @@ name = "axdriver-dyn"
 version = "0.1.0"
 dependencies = [
  "axklib 0.2.0 (git+https://github.com/arceos-hypervisor/arceos?branch=hypervisor)",
+ "axtask",
  "cfg-if",
  "log",
  "memory_addr",
@@ -3455,6 +3456,7 @@ name = "rknpu"
 version = "0.1.0"
 dependencies = [
  "aarch64-cpu-ext",
+ "axtask",
  "bare-test-macros",
  "bitflags 2.10.0",
  "dma-api 0.5.2",

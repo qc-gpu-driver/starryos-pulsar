@@ -1,7 +1,24 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(cargo metadata --manifest-path arceos/Cargo.toml --format-version 1)",
+      "Bash(cargo tree -p rockchip-pm)",
+      "Bash(cargo doc --package rockchip-pm --no-deps --open)",
+      "Bash(cargo doc --package axerrno --no-deps)",
+      "Bash(grep -n \"set_wait_fn\" /home/inkbottle/othersrc/npu/drivers/rknpu/src/*.rs)",
+      "Bash(cargo axplat info -c axplat-aarch64-dyn)",
+      "Bash(make aarch64)",
+      "Read(//home/inkbottle/.cargo/registry/src/**)",
+      "Bash(cargo tree --target aarch64-unknown-none-softfloat)",
+      "Read(//home/inkbottle/othersrc/StarryOS/arceos/modules/**)",
+      "Read(//home/inkbottle/othersrc/StarryOS/npu/crates/axplat-aarch64-dyn/**)",
+      "Read(//home/inkbottle/othersrc/StarryOS/**)",
+      "Read(//home/inkbottle/othersrc/StarryOS/arceos/api/axfeat/**)",
+      "Read(//home/inkbottle/othersrc/StarryOS/arceos/modules/axdriver/src/dyn_drivers/**)",
+      "WebFetch(domain:crates.io)",
+      "Bash(grep -n 'fn register\\\\|fn set_enable\\\\|IrqHandler\\\\|type.*Handler' /home/inkbottle/.cargo/registry/src/mirrors.ustc.edu.cn-38d0e5eb5da2abae/axplat-0.3.*/src/irq.rs)",
+      "Bash(grep -n 'type Handler\\\\|pub type Handler' /home/inkbottle/.cargo/registry/src/mirrors.ustc.edu.cn-38d0e5eb5da2abae/handler_table-*/src/lib.rs)"
     ]
   }
 }

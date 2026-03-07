@@ -127,6 +127,7 @@ pub fn rust_main(cpu_id: usize, arg: usize) -> ! {
             log_level = {}
             backtrace = {}
             smp = {}
+            is turn smp!
         "},
         axconfig::ARCH,
         axconfig::PLATFORM,

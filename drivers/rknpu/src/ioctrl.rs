@@ -26,10 +26,10 @@
 //! RK3588 有多达 3 个 NPU 核心。单个 `RknpuSubmit` 可以通过 `subcore_task[5]` 
 //! 数组针对多个核心 — 每个条目指定任务数组的哪个切片发送到哪个核心。
 //! 驱动遍历非空条目并为每个条目调用 `submit_one()`。
-
 use core::hint::spin_loop;
 use core::sync::atomic::Ordering;
 use crate::Vec;
+
 
 use mbarrier::mb;
 
@@ -167,71 +167,6 @@ pub struct RknpuMemSync {
 }
 
 impl Rknpu {
-    // pub fn submit_ioctrl(&mut self, args: &mut RknpuSubmit) -> Result<(), RknpuError> {
-    //     self.gem.comfirm_write_all()?;
-    //     let mut int_status = 0;
-
-    //     if args.flags & 1 << 1 > 0 {
-    //         debug!("Nonblock task");
-    //     }
-    //     let task_ptr = args.task_obj_addr as *mut RknpuTask;
-    //     let mut task_iter = args.task_start as usize;
-    //     let task_iter_end = task_iter + args.task_number as usize;
-    //     let max_submit_number = self.data.max_submit_number as usize;
-
-    //     while task_iter < task_iter_end {
-    //         let task_number = (task_iter_end - task_iter).min(max_submit_number);
-    //         let submit_tasks =
-    //             unsafe { core::slice::from_raw_parts_mut(task_ptr.add(task_iter), task_number) };
-
-    //         let job = SubmitRef {
-    //             base: SubmitBase {
-    //                 flags: JobMode::from_bits_retain(args.flags),
-    //                 task_base_addr: args.task_base_addr as _,
-    //                 core_idx: args.core_mask.trailing_zeros() as usize,
-    //                 // core_idx: 0x0,
-    //                 int_mask: submit_tasks.last().unwrap().int_mask,
-    //                 int_clear: submit_tasks[0].int_mask,
-    //                 regcfg_amount: submit_tasks[0].regcfg_amount,
-    //             },
-    //             task_number,
-    //             regcmd_base_addr: submit_tasks[0].regcmd_addr as _,
-    //         };
-    //         debug!("Submit {task_number} jobs: {job:#x?}");
-    //         while self.base[0].handle_interrupt() != 0 {
-    //             spin_loop();
-    //         }
-    //         debug!("Submitting PC job...");
-    //         self.base[0].submit_pc(&self.data, &job).unwrap();
-
-    //         // Wait for completion
-    //         loop {
-    //             let status = self.base[0].pc().interrupt_status.get();
-    //             let status = rknpu_fuzz_status(status);
-
-    //             if status & job.base.int_mask > 0 {
-    //                 int_status = job.base.int_mask & status;
-    //                 break;
-    //             }
-    //             if status != 0 {
-    //                 debug!("Interrupt status changed: {:#x}", status);
-    //                 return Err(RknpuError::TaskError);
-    //             }
-    //         }
-    //         self.base[0].pc().clean_interrupts();
-    //         debug!("Job completed");
-    //         submit_tasks.last_mut().unwrap().int_status = int_status;
-    //         task_iter += task_number;
-    //     }
-    //     self.gem.prepare_read_all()?;
-
-    //     args.task_counter = args.task_number as _;
-    //     args.hw_elapse_time = (args.timeout / 2) as _;
-
-    //     Ok(())
-    // }
-    /// SUBMIT ioctl 的入口点 — 将任务分派到 NPU 核心。
-    ///
     /// # 工作流程
     ///
     /// 1. **刷新缓存**（`comfirm_write_all`），以便 NPU 可以看到
@@ -242,8 +177,8 @@ impl Rknpu {
     ///    NPU 产生的输出张量。
     /// 4. 为用户空间填充 `task_counter` 和 `hw_elapse_time`。
     pub fn submit_ioctrl(&mut self, args: &mut RknpuSubmit) -> Result<(), RknpuError> {
-        debug!("[NPU] SUBMIT: {} tasks, flags={:#x}, core_mask={:#x}",
-              args.task_number, args.flags, args.core_mask);
+        //warn!("[NPU] SUBMIT: {} tasks, flags={:#x}, core_mask={:#x}",
+         //     args.task_number, args.flags, args.core_mask);
 
         // Step 1: ensure NPU can see CPU-written data
         self.gem.comfirm_write_all()?;
@@ -257,8 +192,8 @@ impl Rknpu {
 
         let mut task_iter = active_subcore[0].task_start as usize;
         let task_iter_end = task_iter + active_subcore.iter().map(|s| s.task_number as usize).sum::<usize>();
-        //warn!("Total tasks to submit: {}, active cores: {}, max batch size: {}",
-        //      args.task_number, active_subcore.len(), max_submit_number);
+        //warn!("Total tasks to submit: {}, active cores: {}",
+              //args.task_number, active_subcore.len());
         while task_iter < task_iter_end {
             // Clamp batch size to hardware limit
             let task_batch = active_subcore.len().min(task_iter_end - task_iter); //每个核心1个任务，3个核心就是3个任务
@@ -272,15 +207,6 @@ impl Rknpu {
             task_iter += task_batch;
             self.wait_all_npucore(self.wait_fn, int_mask, submit_tasks)?;
         }   
-        // Step 2: submit to each core that has tasks
-        // for idx in 0..5 {
-        //     if args.subcore_task[idx].task_number == 0 {
-        //         continue;
-        //     }
-        //     debug!("Submitting subcore task index: {}", idx);
-        //     let submitted_tasks = self.base[idx].submit_one(&self.data, self.wait_fn, idx, args)?;
-        //     debug!("[NPU] core {} done: {} tasks executed", idx, submitted_tasks);
-        // }
 
         // Step 3: ensure CPU can see NPU-written results
         self.gem.prepare_read_all()?;
@@ -297,7 +223,6 @@ impl Rknpu {
         let wait_start_idx:usize = 0; //从0开始等待
         let max_core:usize = submit_tasks.len();
         let mut done:[bool; 3] = [false; 3]; //跟踪每个核心是否完成
-        
             if let Some(wait) = normal_wait_fn {
                     debug!("[NPU]   waiting (IRQ+WFI mode)...");
                     // ┌─────────────────────────────────────────────────────┐
@@ -317,7 +242,7 @@ impl Rknpu {
                                  self.base[idx].clean_interrupts();
                                  // Reset atomic for the next batch.
                                 self.base[idx].irq_status.store(0, Ordering::Release);
-                                debug!("[NPU]   batch done: int_status={:#x}", int_status[idx]);
+                                warn!("[NPU]   batch done: int_status={:#x}", int_status[idx]);
                                 submit_tasks[idx].int_status = int_status[idx]; //给对应核心的单任务设置完成状态，用户空间会检查这个状态并继续处理结果
                                 done[idx] = true; //标记这个核心完成了
                             }
@@ -338,6 +263,7 @@ impl Rknpu {
 
                         // Sleep until any interrupt (including NPU) wakes the CPU.
                         (wait)();
+
                     }
             }else {
                     debug!("[NPU]   waiting (busy-wait mode)...");

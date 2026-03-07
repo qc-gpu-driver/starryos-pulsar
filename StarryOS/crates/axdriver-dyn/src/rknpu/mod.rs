@@ -85,9 +85,10 @@ fn fdt_irq_to_gic_num(cells: &[u32]) -> usize {
 ///
 /// 代价：每次唤醒多 ~10μs，NPU 任务通常 >100μs，影响可忽略
 #[cfg(target_arch = "aarch64")]
-fn wfi_and_relax() {
-    unsafe { core::arch::asm!("wfi") };
-    axklib::time::busy_wait(core::time::Duration::from_micros(10));
+fn irq_yield() {
+    //unsafe { core::arch::asm!("wfi") };
+    //axklib::time::busy_wait(core::time::Duration::from_micros(10));
+    axtask::yield_now();
 }
 
 module_driver!(
@@ -169,7 +170,7 @@ fn probe(info: FdtInfo<'_>, plat_dev: PlatformDevice) -> Result<(), OnProbeError
 
     // 启用中断驱动等待模式（WFI 替代忙轮询）
     #[cfg(target_arch = "aarch64")]
-    npu.set_wait_fn(wfi_and_relax);
+    npu.set_wait_fn(irq_yield);
 
     plat_dev.register(npu);
     warn!("NPU registered successfully");

@@ -41,9 +41,6 @@ unsafe impl Send for RknpuCore {}
 
 impl RknpuCore {
 
-
-
-
     ///提交并执行1个任务
     pub fn start_execute_one(&mut self, idx:usize,data: &RknpuData,rknpu_task: &mut RknpuTask,args: &RknpuSubmit) -> Result<(), RknpuError> {
         let job = SubmitRef {
@@ -97,7 +94,7 @@ impl RknpuCore {
     ///
     /// 硬件一次只能接受 `max_submit_number` 个任务。
     /// 如果任务数超过此数量，此函数会循环，一次提交一批并等待每批完成。
-    pub fn submit_one(&mut self,data: &RknpuData,wait_fn:Option<fn()>, idx: usize, args: &mut RknpuSubmit) -> Result<usize, RknpuError> {
+    pub fn _submit_one(&mut self,data: &RknpuData,wait_fn:Option<fn()>, idx: usize, args: &mut RknpuSubmit) -> Result<usize, RknpuError> {
         let task_ptr = args.task_obj_addr as *mut RknpuTask;
         let subcore = &args.subcore_task[idx];
 
