@@ -22,6 +22,7 @@
                 - [DDMA / SDMA](./documents/registers/ddma-sdma.md)
                 - [GLOBAL](./documents/registers/global.md)
         - [IOCTL协议与数据结构](./documents/ioctl-protocol.md)
+        - [当前提交-IRQ 边界快照恢复系统](./documents/submit-irq-snapshot-restore.md)
         - [rknn用户库手册](./documents/rknnlibso/overview.md)
             - [推理 API 参考](./documents/rknnlibso/rknn-api.md)
             - [矩阵乘法 API](./documents/rknnlibso/rknn-matmul.md)

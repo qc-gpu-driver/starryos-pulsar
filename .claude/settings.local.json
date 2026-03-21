@@ -18,7 +18,8 @@
       "Read(//home/inkbottle/othersrc/StarryOS/arceos/modules/axdriver/src/dyn_drivers/**)",
       "WebFetch(domain:crates.io)",
       "Bash(grep -n 'fn register\\\\|fn set_enable\\\\|IrqHandler\\\\|type.*Handler' /home/inkbottle/.cargo/registry/src/mirrors.ustc.edu.cn-38d0e5eb5da2abae/axplat-0.3.*/src/irq.rs)",
-      "Bash(grep -n 'type Handler\\\\|pub type Handler' /home/inkbottle/.cargo/registry/src/mirrors.ustc.edu.cn-38d0e5eb5da2abae/handler_table-*/src/lib.rs)"
+      "Bash(grep -n 'type Handler\\\\|pub type Handler' /home/inkbottle/.cargo/registry/src/mirrors.ustc.edu.cn-38d0e5eb5da2abae/handler_table-*/src/lib.rs)",
+      "Bash(cargo +stable metadata --manifest-path \"/home/inkbottle/othersrc/npu/StarryOS/arceos/Cargo.toml\" --format-version 1 --no-deps --offline)"
     ]
   }
 }

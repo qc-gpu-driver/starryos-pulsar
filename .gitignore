@@ -3,3 +3,6 @@
 *.bin
 *.elf
 *.img
+other/
+*.pdf
+npu-state-machine-context.md

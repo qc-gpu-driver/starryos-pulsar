@@ -28,6 +28,11 @@
 <td>从用户态提交到硬件执行完成的完整时序逻辑，包含状态机和各种失败路径</td>
 <td>查询job生命周期</td>
 </tr>
+<tr>
+<td><a href="./submit-irq-snapshot-restore.html"><strong>当前提交-IRQ 边界快照恢复系统</strong></a></td>
+<td>总结 step-submit、owner 切换、IRQ 边界快照/写坏/恢复/校验，以及相关 struct 的职责</td>
+<td>整理当前实验实现、查数据结构分工、回顾抢占边界语义</td>
+</tr>
 </table>
 
 ## 来源标注约定
