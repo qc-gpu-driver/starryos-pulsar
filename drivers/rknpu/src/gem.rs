@@ -35,6 +35,8 @@
 //! 可由 **CPU**（虚拟地址）和 **NPU**（总线/物理地址）访问。
 
 use alloc::collections::btree_map::BTreeMap;
+use core::mem::size_of;
+
 use dma_api::{DVec, Direction};
 
 use crate::{
@@ -85,8 +87,10 @@ impl GemPool {
         args.sram_size = data.len() as _;
         args.dma_addr = data.bus_addr();
         args.obj_addr = data.as_ptr() as _;
-        warn!("[NPU] MEM_CREATE: handle={}, size={:#x}, dma_addr={:#x}",
-              handle, args.size, args.dma_addr);
+        warn!(
+            "[NPU] MEM_CREATE: handle={}, size={:#x}, dma_addr={:#x}",
+            handle, args.size, args.dma_addr
+        );
         self.pool.insert(args.handle, data);
         Ok(())
     }
@@ -98,6 +102,37 @@ impl GemPool {
         self.pool
             .get(&handle)
             .map(|dvec| (dvec.bus_addr(), dvec.len()))
+    }
+
+    /// 按 DMA 总线地址读取 GEM 缓冲区中的一段 `u64` 命令流。
+    ///
+    /// 这用于在 submit 路径中把当前 task 的 regcmd 内容复制到内核侧，
+    /// 避免把 DMA 地址误当成 CPU 虚拟地址直接解引用。
+    pub fn copy_regcmd_words(
+        &self,
+        dma_addr: u64,
+        byte_offset: usize,
+        word_count: usize,
+    ) -> Option<alloc::vec::Vec<u64>> {
+        let start = dma_addr.checked_add(byte_offset as u64)?;
+        let byte_len = word_count.checked_mul(size_of::<u64>())?;
+
+        self.pool.values().find_map(|dvec| {
+            let base = dvec.bus_addr();
+            let len = dvec.len();
+            let end = base.checked_add(len as u64)?;
+            if start < base || start.checked_add(byte_len as u64)? > end {
+                return None;
+            }
+
+            let start_offset = (start - base) as usize;
+            let src = unsafe { dvec.as_ptr().add(start_offset) as *const u64 };
+            let mut out = alloc::vec::Vec::with_capacity(word_count);
+            for idx in 0..word_count {
+                out.push(unsafe { src.add(idx).read_unaligned() });
+            }
+            Some(out)
+        })
     }
 
     /// 在 CPU 和设备之间同步缓冲区区域。

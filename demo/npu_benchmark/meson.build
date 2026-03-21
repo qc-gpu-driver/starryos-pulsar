@@ -18,6 +18,25 @@ test('matmul fp16 4x32x16',test_matmul_fp16, is_parallel : false , args : ['4', 
 # test max feature data for one task
 test('matmul fp16 384x384x4096',test_matmul_fp16, is_parallel : false , args : ['384', '384' ,'4096'])
 
+matmul_multi_process = executable(
+    'matmul_multi_process',
+    'tests/matmul_multi_process.c',
+    include_directories : incdir,
+    link_with : lib,
+    link_args : '-lm'
+)
+test(
+    'matmul multi process',
+    matmul_multi_process,
+    is_parallel : false,
+    timeout : 600
+)
+
+matmul_llama_concurrent = executable(
+    'matmul_llama_concurrent',
+    'tests/matmul_llama_concurrent.c'
+)
+
 test_matmul_int8  = executable('matmul_int8', 'tests/matmul_int8.c', include_directories : incdir, link_with : lib, link_args : '-lm')
 test('matmul int8 1x32x32',test_matmul_int8, is_parallel : false , args : ['1','32','32'])
 test('matmul int8 1x64x64',test_matmul_int8, is_parallel : false , args : ['1','64','64'])

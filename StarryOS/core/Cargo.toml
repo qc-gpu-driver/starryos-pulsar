@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 axbacktrace.workspace = true
 axconfig.workspace = true
+axdma.workspace = true
 axerrno.workspace = true
 axfeat.workspace = true
 axfs-ng-vfs.workspace = true

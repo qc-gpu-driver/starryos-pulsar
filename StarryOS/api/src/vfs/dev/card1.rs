@@ -2,16 +2,17 @@ use core::{
     any::Any,
     convert::TryFrom,
     ffi::{CStr, c_char, c_ulong},
-    mem,
+    mem::{self, size_of},
 };
 
 use axfs_ng_vfs::{DeviceId, NodeFlags, VfsError, VfsResult};
+use axtask::{current, yield_now};
 use memory_addr::{MemoryAddr, PhysAddrRange};
 use rknpu::{
-    RknpuAction,
+    NpuOwnerIds, RknpuAction,
     ioctrl::{RknpuMemCreate, RknpuMemMap, RknpuSubmit},
 };
-use starry_core::vfs::DeviceMmap;
+use starry_core::{task::AsThread, vfs::DeviceMmap};
 
 use super::{
     card0::{RknpuCmd, copy_from_user, copy_to_user},
@@ -213,9 +214,12 @@ impl DeviceOps for Card1 {
 
 /// Gets a reference to the NPU device
 pub fn npu() -> Result<rdrive::DeviceGuard<::rknpu::Rknpu>, VfsError> {
+    // 这里改成阻塞锁：
+    // submit 路径现在会在 task 边界主动让出，因此并发进程应该排队推进，
+    // 而不是因为瞬时竞争直接收到 `AddressInUse`。
     rdrive::get_one()
         .ok_or(VfsError::NotFound)?
-        .try_lock()
+        .lock()
         .map_err(|_| VfsError::AddressInUse)
 }
 
@@ -241,12 +245,30 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
             )?;
             info!("rknpu submit ioctl {submit_args:#x?}");
 
-            if let Err(e) = with_npu(|rknpu_dev| {
-                rknpu_dev
-                    .submit_ioctrl(&mut submit_args)
-                    .map_err(|_| VfsError::InvalidData)
-            }) {
-                warn!("rknpu submit ioctl failed: {:?}", e);
+            // 用“当前线程 + 当前进程 + 当前地址空间”组成 owner key，
+            // 驱动后续据此保存/恢复这次 submit 的软件进度。
+            let curr = current();
+            let thr = curr.as_thread();
+            let owner = NpuOwnerIds {
+                task_id: curr.id().as_u64(),
+                process_id: thr.proc_data.proc.pid() as u64,
+                address_space_id: alloc::sync::Arc::as_ptr(&thr.proc_data.aspace) as usize as u64,
+            };
+
+            loop {
+                let finished = with_npu(|rknpu_dev| {
+                    rknpu_dev
+                        .submit_ioctrl_step_with_owner(&mut submit_args, owner)
+                        .map_err(|_| VfsError::InvalidData)
+                })
+                .inspect_err(|e| warn!("rknpu submit ioctl failed: {:?}", e))?;
+
+                if finished {
+                    break;
+                }
+                // 这次只推进到一个 task IRQ 边界；主动让出后，别的 owner
+                // 就有机会接管设备并继续它们各自未完成的 submit。
+                yield_now();
             }
             debug!("rknpu submit ioctl result: {:#x?}", submit_args);
 
@@ -266,13 +288,12 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
                 mem::size_of::<RknpuMemCreate>(),
             )?;
 
-            if let Err(e) = with_npu(|rknpu_dev| {
+            with_npu(|rknpu_dev| {
                 rknpu_dev
                     .create(&mut mem_create_args)
                     .map_err(|_| VfsError::InvalidData)
-            }) {
-                warn!("rknpu mem_create ioctl failed: {:?}", e);
-            }
+            })
+            .inspect_err(|e| warn!("rknpu mem_create ioctl failed: {:?}", e))?;
 
             copy_to_user(
                 arg as *mut u8,
@@ -289,7 +310,7 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
                 mem::size_of::<RknpuMemMap>(),
             )?;
 
-            if let Err(e) = with_npu(|rknpu_dev| {
+            with_npu(|rknpu_dev| {
                 if rknpu_dev.get_phys_addr_and_size(mem_map.handle).is_some() {
                     mem_map.offset = (mem_map.handle as u64) << PAGE_SHIFT;
 
@@ -302,10 +323,8 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
                     warn!("mem_map: invalid handle={}", mem_map.handle);
                     Err(VfsError::InvalidData)
                 }
-            }) {
-                warn!("rknpu mem_map ioctl failed: {:?}", e);
-                return Err(e);
-            }
+            })
+            .inspect_err(|e| warn!("rknpu mem_map ioctl failed: {:?}", e))?;
 
             copy_to_user(
                 arg as *mut u8,
@@ -318,6 +337,33 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
         }
         RknpuCmd::MemSync => {
             info!("rknpu mem_sync ioctl");
+        }
+        RknpuCmd::DumpStatus => {
+            info!("rknpu dump_status ioctl");
+            let mut submit = RknpuSubmit::default();
+
+            if arg != 0 {
+                copy_from_user(
+                    &mut submit as *mut _ as *mut u8,
+                    arg as *const u8,
+                    size_of::<RknpuSubmit>(),
+                )?;
+            }
+
+            let curr = current();
+            let thr = curr.as_thread();
+            let owner = NpuOwnerIds {
+                task_id: curr.id().as_u64(),
+                process_id: thr.proc_data.proc.pid() as u64,
+                address_space_id: alloc::sync::Arc::as_ptr(&thr.proc_data.aspace) as usize as u64,
+            };
+
+            // 这是纯调试辅助路径，不推进任务，只把当前 owner 视角下的状态格式化输出。
+            with_npu(|rknpu_dev| {
+                let state = rknpu_dev.read_process_npu_state(&submit, owner);
+                state.dump_pretty();
+                Ok(())
+            })?;
         }
         _ => {
             info!("rknpu action ioctl");
@@ -333,15 +379,14 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
                 action.flags, action.value
             );
 
-            if let Err(e) = with_npu(|rknpu_dev| {
+            with_npu(|rknpu_dev| {
                 let val = rknpu_dev
                     .action(action.flags)
                     .map_err(|_| VfsError::InvalidData)?;
                 action.value = val;
                 Ok(())
-            }) {
-                warn!("rknpu action ioctl failed: {:?}", e);
-            }
+            })
+            .inspect_err(|e| warn!("rknpu action ioctl failed: {:?}", e))?;
 
             copy_to_user(
                 arg as *mut u8,
@@ -363,12 +408,27 @@ pub fn rknpu_submit_ioctl(arg: usize) -> VfsResult<usize> {
         mem::size_of::<RknpuSubmit>(),
     )?;
 
-    if let Err(e) = with_npu(|rknpu_dev| {
-        rknpu_dev
-            .submit_ioctrl(&mut submit_args)
-            .map_err(|_| VfsError::InvalidData)
-    }) {
-        warn!("rknpu submit ioctl failed: {:?}", e);
+    let curr = current();
+    let thr = curr.as_thread();
+    let owner = NpuOwnerIds {
+        task_id: curr.id().as_u64(),
+        process_id: thr.proc_data.proc.pid() as u64,
+        address_space_id: alloc::sync::Arc::as_ptr(&thr.proc_data.aspace) as usize as u64,
+    };
+
+    loop {
+        let finished = with_npu(|rknpu_dev| {
+            rknpu_dev
+                .submit_ioctrl_step_with_owner(&mut submit_args, owner)
+                .map_err(|_| VfsError::InvalidData)
+        })
+        .inspect_err(|e| warn!("rknpu submit ioctl failed: {:?}", e))?;
+
+        if finished {
+            break;
+        }
+        // 与上面的 ioctl 分发路径保持一致：每推进一个 task 边界就主动让出。
+        yield_now();
     }
 
     copy_to_user(
@@ -389,13 +449,12 @@ pub fn rknpu_mem_create_ioctl(arg: usize) -> VfsResult<usize> {
         mem::size_of::<RknpuMemCreate>(),
     )?;
 
-    if let Err(e) = with_npu(|rknpu_dev| {
+    with_npu(|rknpu_dev| {
         rknpu_dev
             .create(&mut mem_create_args)
             .map_err(|_| VfsError::InvalidData)
-    }) {
-        warn!("rknpu mem_create ioctl failed: {:?}", e);
-    }
+    })
+    .inspect_err(|e| warn!("rknpu mem_create ioctl failed: {:?}", e))?;
 
     copy_to_user(
         arg as *mut u8,

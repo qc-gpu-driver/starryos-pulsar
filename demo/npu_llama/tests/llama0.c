@@ -106,6 +106,21 @@ typedef struct {
 
 #define MAX_BUFFER_POOL_SIZE 12
 #define NPU_MAX_CORES 3
+
+/* 调试总开关：允许在现有可跑通路径上按阶段打印 NPU 状态。 */
+static int g_enable_npu_dump = 1;
+
+/* 通过 dump ioctl 打印当前 submit/owner 视角下的 NPU 状态。 */
+static void maybe_dump_npu_status(int npu_fd, const char *stage, struct rknpu_submit *submit) {
+    if (!g_enable_npu_dump || npu_fd < 0 || submit == NULL) {
+        return;
+    }
+
+    printf("[npu-dump] %s\n", stage);
+    if (ioctl(npu_fd, DRM_IOCTL_RKNPU_DUMP_STATUS, submit) < 0) {
+        printf("[npu-dump] ioctl failed at %s: errno=%d (%s)\n", stage, errno, strerror(errno));
+    }
+}
 #endif
 
 typedef struct {
@@ -768,10 +783,14 @@ int matmul_npu_cached(Transformer* t, float* xout, float* x, NPUWeightCache* wei
             { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }
         },
     };
+
+    maybe_dump_npu_status(t->npu_fd, "single-core before submit", &submit);
     
     if (ioctl(t->npu_fd, DRM_IOCTL_RKNPU_SUBMIT, &submit) < 0) {
         goto cleanup_error;
     }
+
+    maybe_dump_npu_status(t->npu_fd, "single-core after submit", &submit);
     
     // Copy results back
     float *output_data = (float*) output;
@@ -785,6 +804,8 @@ int matmul_npu_cached(Transformer* t, float* xout, float* x, NPUWeightCache* wei
             goto cleanup_error;
         }
     }
+
+    maybe_dump_npu_status(t->npu_fd, "single-core after result readback", &submit);
     
     // Clean up
     if (use_pool) {
@@ -972,9 +993,13 @@ int matmul_npu_3core_qkv(Transformer* t, float* xout_q, float* xout_k, float* xo
         },
     };
 
+    maybe_dump_npu_status(t->npu_fd, "qkv-3core before submit", &submit);
+
     if (ioctl(t->npu_fd, DRM_IOCTL_RKNPU_SUBMIT, &submit) < 0) {
         goto qkv_cleanup_error;
     }
+
+    maybe_dump_npu_status(t->npu_fd, "qkv-3core after submit", &submit);
 
     // Copy results back for each core
     for (int c = 0; c < 3; c++) {
@@ -990,6 +1015,8 @@ int matmul_npu_3core_qkv(Transformer* t, float* xout_q, float* xout_k, float* xo
             }
         }
     }
+
+    maybe_dump_npu_status(t->npu_fd, "qkv-3core after result readback", &submit);
 
     // Cleanup
     for (int c = 0; c < 3; c++) {
@@ -1621,6 +1648,192 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
     free(prompt_tokens);
 }
 
+#if USE_NPU
+/* CPU 参考实现：供 snapshot-stress 模式逐轮校验 NPU 输出。 */
+static void matmul_reference(float* xout, const float* x, const float* w, int n, int d) {
+    for (int i = 0; i < d; i++) {
+        float val = 0.0f;
+        for (int j = 0; j < n; j++) {
+            val += w[i * n + j] * x[j];
+        }
+        xout[i] = val;
+    }
+}
+
+/* 允许一定 FP16 误差范围的逐元素校验。 */
+static int validate_vector(
+    const char* name,
+    const float* got,
+    const float* ref,
+    int len,
+    float abs_tol,
+    float rel_tol
+) {
+    for (int i = 0; i < len; i++) {
+        float diff = fabsf(got[i] - ref[i]);
+        float limit = abs_tol + rel_tol * fabsf(ref[i]);
+        if (diff > limit) {
+            fprintf(
+                stderr,
+                "[snapshot-stress] %s mismatch at idx=%d got=%f ref=%f diff=%f limit=%f\n",
+                name,
+                i,
+                got[i],
+                ref[i],
+                diff,
+                limit
+            );
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* 生成一份稳定、可复现的初始输入。 */
+static void seed_snapshot_input(float* x, int dim) {
+    for (int i = 0; i < dim; i++) {
+        int lane = (i % 17) - 8;
+        x[i] = lane / 16.0f;
+    }
+}
+
+/*
+ * 把本轮 q/k/v 输出折叠成下一轮输入。
+ *
+ * 这样 20 轮测试不是彼此独立的，而是一条相关联的链，
+ * 更容易暴露“剩余任务/剩余轮次状态没有正确延续”的问题。
+ */
+static void fold_snapshot_outputs(
+    float* next,
+    const float* q,
+    const float* k,
+    const float* v,
+    const float* prev,
+    int dim,
+    int kv_dim
+) {
+    for (int i = 0; i < dim; i++) {
+        float mix = 0.0625f * q[i]
+                  + 0.03125f * k[i % kv_dim]
+                  - 0.015625f * v[(i * 7) % kv_dim]
+                  + 0.125f * prev[i];
+        next[i] = tanhf(mix);
+    }
+}
+
+/*
+ * 在现有 llama 可运行路径上做 20 轮相关联的 3 核 QKV 自测。
+ *
+ * 这个模式不依赖额外 demo，只关心：
+ * - 提交是否都成功；
+ * - 每一轮结果是否与 CPU 参考一致；
+ * - 关闭 dump 打印后，能否作为简洁的板级回归测试使用。
+ */
+static int run_snapshot_stress(Transformer* transformer) {
+    const int rounds = 20;
+    const float abs_tol = 0.5f;
+    const float rel_tol = 0.05f;
+
+    if (transformer == NULL || transformer->npu_fd < 0 || !transformer->weight_cache.enabled) {
+        fprintf(stderr, "[snapshot-stress] NPU or cached weights are not ready\n");
+        return -1;
+    }
+
+    int dim = transformer->config.dim;
+    int kv_dim = (dim * transformer->config.n_kv_heads) / transformer->config.n_heads;
+    if (dim <= 0 || kv_dim <= 0 || transformer->config.n_layers <= 0) {
+        fprintf(stderr, "[snapshot-stress] invalid model dimensions\n");
+        return -1;
+    }
+
+    float* input = calloc(dim, sizeof(float));
+    float* next = calloc(dim, sizeof(float));
+    float* out_q = calloc(dim, sizeof(float));
+    float* ref_q = calloc(dim, sizeof(float));
+    float* out_k = calloc(kv_dim, sizeof(float));
+    float* ref_k = calloc(kv_dim, sizeof(float));
+    float* out_v = calloc(kv_dim, sizeof(float));
+    float* ref_v = calloc(kv_dim, sizeof(float));
+    if (!input || !next || !out_q || !ref_q || !out_k || !ref_k || !out_v || !ref_v) {
+        fprintf(stderr, "[snapshot-stress] allocation failed\n");
+        free(input);
+        free(next);
+        free(out_q);
+        free(ref_q);
+        free(out_k);
+        free(ref_k);
+        free(out_v);
+        free(ref_v);
+        return -1;
+    }
+
+    seed_snapshot_input(input, dim);
+
+    int old_dump = g_enable_npu_dump;
+    g_enable_npu_dump = 0;
+
+    for (int round = 0; round < rounds; round++) {
+        int layer = round % transformer->config.n_layers;
+        fprintf(stderr, "[snapshot-stress] round %d/%d\n", round + 1, rounds);
+
+        memset(out_q, 0, dim * sizeof(float));
+        memset(out_k, 0, kv_dim * sizeof(float));
+        memset(out_v, 0, kv_dim * sizeof(float));
+
+        if (matmul_npu_3core_qkv(transformer, out_q, out_k, out_v, input, layer) != 0) {
+            fprintf(stderr, "[snapshot-stress] submit failed at round %d layer %d\n", round + 1, layer);
+            g_enable_npu_dump = old_dump;
+            free(input);
+            free(next);
+            free(out_q);
+            free(ref_q);
+            free(out_k);
+            free(ref_k);
+            free(out_v);
+            free(ref_v);
+            return -1;
+        }
+
+        /* 用 CPU 直接算出同一层 q/k/v 参考值，再与 NPU 输出逐项比较。 */
+        matmul_reference(ref_q, input, transformer->weights.wq + (size_t)layer * dim * dim, dim, dim);
+        matmul_reference(ref_k, input, transformer->weights.wk + (size_t)layer * dim * kv_dim, dim, kv_dim);
+        matmul_reference(ref_v, input, transformer->weights.wv + (size_t)layer * dim * kv_dim, dim, kv_dim);
+
+        if (validate_vector("q", out_q, ref_q, dim, abs_tol, rel_tol) != 0
+            || validate_vector("k", out_k, ref_k, kv_dim, abs_tol, rel_tol) != 0
+            || validate_vector("v", out_v, ref_v, kv_dim, abs_tol, rel_tol) != 0) {
+            fprintf(stderr, "[snapshot-stress] verify failed at round %d layer %d\n", round + 1, layer);
+            g_enable_npu_dump = old_dump;
+            free(input);
+            free(next);
+            free(out_q);
+            free(ref_q);
+            free(out_k);
+            free(ref_k);
+            free(out_v);
+            free(ref_v);
+            return -1;
+        }
+
+        fold_snapshot_outputs(next, out_q, out_k, out_v, input, dim, kv_dim);
+        memcpy(input, next, dim * sizeof(float));
+    }
+
+    g_enable_npu_dump = old_dump;
+    free(input);
+    free(next);
+    free(out_q);
+    free(ref_q);
+    free(out_k);
+    free(ref_k);
+    free(out_v);
+    free(ref_v);
+
+    fprintf(stderr, "[snapshot-stress] pass\n");
+    return 0;
+}
+#endif
+
 // ----------------------------------------------------------------------------
 // CLI
 
@@ -1629,6 +1842,7 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
 void error_usage() {
     fprintf(stderr, "Usage:   run <checkpoint> [options]\n");
     fprintf(stderr, "Example: run model.bin -n 256 -i \"Once upon a time\"\n");
+    fprintf(stderr, "         run model.bin --snapshot-stress\n");
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -t <float>  temperature in [0,inf], default 1.0\n");
     fprintf(stderr, "  -p <float>  p value in top-p (nucleus) sampling in [0,1] default 0.9\n");
@@ -1638,6 +1852,7 @@ void error_usage() {
     fprintf(stderr, "  -z <string> optional path to custom tokenizer\n");
     fprintf(stderr, "  -m <string> mode: generate|chat, default: generate\n");
     fprintf(stderr, "  -y <string> (optional) system prompt in chat mode\n");
+    fprintf(stderr, "  --snapshot-stress  run 20 rounds of chained 3-core QKV matmul self-test\n");
     exit(EXIT_FAILURE);
 }
 
@@ -1651,13 +1866,20 @@ int main(int argc, char *argv[]) {
     unsigned long long rng_seed = 0;
     char *mode = "generate";
     char *system_prompt = NULL;
+    int snapshot_stress = 0;
 
     if (argc >= 2) { checkpoint_path = argv[1]; } else { error_usage(); }
-    for (int i = 2; i < argc; i+=2) {
+    for (int i = 2; i < argc;) {
+        /* 特殊长选项单独处理，不占用后续 value 参数位。 */
+        if (strcmp(argv[i], "--snapshot-stress") == 0) {
+            snapshot_stress = 1;
+            i += 1;
+            continue;
+        }
         if (i + 1 >= argc) { error_usage(); }
         if (argv[i][0] != '-') { error_usage(); }
         if (strlen(argv[i]) != 2) { error_usage(); }
-        
+
         if (argv[i][1] == 't') { temperature = atof(argv[i + 1]); }
         else if (argv[i][1] == 'p') { topp = atof(argv[i + 1]); }
         else if (argv[i][1] == 's') { rng_seed = atoi(argv[i + 1]); }
@@ -1667,6 +1889,7 @@ int main(int argc, char *argv[]) {
         else if (argv[i][1] == 'm') { mode = argv[i + 1]; }
         else if (argv[i][1] == 'y') { system_prompt = argv[i + 1]; }
         else { error_usage(); }
+        i += 2;
     }
 
     if (rng_seed <= 0) rng_seed = (unsigned int)time(NULL);
@@ -1677,6 +1900,15 @@ int main(int argc, char *argv[]) {
     Transformer transformer;
     build_transformer(&transformer, checkpoint_path);
     if (steps == 0 || steps > transformer.config.seq_len) steps = transformer.config.seq_len;
+
+#if USE_NPU
+    /* 进入专用 NPU 自测模式时，不再继续 tokenizer / sampler / 对话主流程。 */
+    if (snapshot_stress) {
+        int ret = run_snapshot_stress(&transformer);
+        free_transformer(&transformer);
+        return ret == 0 ? 0 : 1;
+    }
+#endif
 
     Tokenizer tokenizer;
     build_tokenizer(&tokenizer, tokenizer_path, transformer.config.vocab_size);

@@ -1,6 +1,8 @@
 //! User task management.
 
 mod stat;
+#[path = "npu_context.rs"]
+mod npu_context;
 
 use alloc::{
     boxed::Box,
@@ -9,11 +11,13 @@ use alloc::{
     vec::Vec,
 };
 use core::{
+    alloc::Layout,
     cell::RefCell,
     ops::Deref,
     sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering},
 };
 
+use axdma::{DMAInfo, dealloc_coherent};
 use axerrno::{AxError, AxResult};
 use axmm::AddrSpace;
 use axpoll::PollSet;
@@ -22,6 +26,7 @@ use axtask::{AxTaskRef, TaskExt, TaskInner, WeakAxTaskRef, current};
 use extern_trait::extern_trait;
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
+use memory_addr::VirtAddr;
 use scope_local::{ActiveScope, Scope};
 use spin::RwLock;
 use starry_process::{Pid, Process, ProcessGroup, Session};
@@ -31,6 +36,7 @@ use starry_signal::{
 };
 use weak_map::WeakMap;
 
+pub use self::npu_context::{NpuContext, NpuContextError};
 pub use self::stat::TaskStat;
 use crate::{
     futex::{FutexKey, FutexTable},
@@ -38,7 +44,7 @@ use crate::{
     time::{TimeManager, TimerState},
 };
 
-///  A wrapper type that assumes the inner type is `Sync`.
+/// A wrapper type that assumes the inner type is `Sync`.
 #[repr(transparent)]
 pub struct AssumeSync<T>(pub T);
 
@@ -57,25 +63,21 @@ pub struct ThreadInner {
     /// The process data shared by all threads in the process.
     pub proc_data: Arc<ProcessData>,
 
-    /// The clear thread tid field
+    /// The clear thread tid field.
     ///
-    /// See <https://manpages.debian.org/unstable/manpages-dev/set_tid_address.2.en.html#clear_child_tid>
-    ///
-    /// When the thread exits, the kernel clears the word at this address if it
-    /// is not NULL.
+    /// See <https://manpages.debian.org/unstable/manpages-dev/set_tid_address.2.en.html#clear_child_tid>.
     clear_child_tid: AtomicUsize,
 
-    /// The head of the robust list
+    /// The head of the robust list.
     robust_list_head: AtomicUsize,
 
-    /// The registered rseq area pointer (user address) for restartable
-    /// sequences.
+    /// The registered rseq area pointer (user address) for restartable sequences.
     rseq_area: AtomicUsize,
 
-    /// The thread-level signal manager
+    /// The thread-level signal manager.
     pub signal: Arc<ThreadSignalManager>,
 
-    /// Time manager
+    /// Time manager.
     ///
     /// This is assumed to be `Sync` because it's only borrowed mutably during
     /// context switches, which is exclusive to the current thread.
@@ -84,8 +86,11 @@ pub struct ThreadInner {
     /// The OOM score adjustment value.
     oom_score_adj: AtomicI32,
 
-    /// Ready to exit
+    /// Ready to exit.
     exit: AtomicBool,
+
+    /// 为后续 NPU 抢占/恢复预留的线程级上下文。
+    pub npu_context: Mutex<NpuContext>,
 }
 
 impl ThreadInner {
@@ -100,6 +105,7 @@ impl ThreadInner {
             time: AssumeSync(RefCell::new(TimeManager::new())),
             oom_score_adj: AtomicI32::new(200),
             exit: AtomicBool::new(false),
+            npu_context: Mutex::new(NpuContext::new()),
         }
     }
 
@@ -205,35 +211,45 @@ impl Thread {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DmaAllocation {
+    user_vaddr: usize,
+    map_size: usize,
+    layout: Layout,
+    dma_info: DMAInfo,
+}
+
+unsafe impl Send for DmaAllocation{}
+unsafe impl Sync for DmaAllocation{}
+
 /// [`Process`]-shared data.
 pub struct ProcessData {
     /// The process.
     pub proc: Arc<Process>,
-    /// The executable path
+    /// The executable path.
     pub exe_path: RwLock<String>,
-    /// The command line arguments
+    /// The command line arguments.
     pub cmdline: RwLock<Arc<Vec<String>>>,
     /// The virtual memory address space.
-    // TODO: scopify
     pub aspace: Arc<Mutex<AddrSpace>>,
-    /// The resource scope
+    /// The resource scope.
     pub scope: RwLock<Scope>,
-    /// The user heap bottom
+    /// The user heap bottom.
     heap_bottom: AtomicUsize,
-    /// The user heap top
+    /// The user heap top.
     heap_top: AtomicUsize,
 
-    /// The resource limits
+    /// The resource limits.
     pub rlim: RwLock<Rlimits>,
 
-    /// The child exit wait event
+    /// The child exit wait event.
     pub child_exit_event: Arc<PollSet>,
-    /// Self exit event
+    /// Self exit event.
     pub exit_event: Arc<PollSet>,
-    /// The exit signal of the thread
+    /// The exit signal of the thread.
     pub exit_signal: Option<Signo>,
 
-    /// The process signal manager
+    /// The process signal manager.
     pub signal: Arc<ProcessSignalManager>,
 
     /// The futex table.
@@ -241,6 +257,18 @@ pub struct ProcessData {
 
     /// The default mask for file permissions.
     umask: AtomicU32,
+
+    /// 为后续 NPU 上下文切换预留的脏位。
+    npu_isdirty: AtomicBool,
+    /// 记录当前进程通过 `dma_malloc` 建立的 DMA 映射。
+    ///
+    /// 这里同时保存三类地址：
+    /// - `user_vaddr`: 返回给用户态的虚拟地址
+    /// - `dma_info.cpu_addr`: 内核访问 coherent DMA 时使用的地址
+    /// - `dma_info.bus_addr`: 设备访问这段内存时使用的 DMA/bus 地址
+    ///
+    /// 当前还没有 `dma_free` syscall，因此只在进程退出时统一回收。
+    dma_allocations: Mutex<Vec<DmaAllocation>>,
 }
 
 impl ProcessData {
@@ -276,6 +304,8 @@ impl ProcessData {
             futex_table: Arc::new(FutexTable::new()),
 
             umask: AtomicU32::new(0o022),
+            npu_isdirty: AtomicBool::new(false),
+            dma_allocations: Mutex::new(Vec::new()),
         })
     }
 
@@ -333,12 +363,110 @@ impl ProcessData {
     pub fn replace_umask(&self, umask: u32) -> u32 {
         self.umask.swap(umask, Ordering::SeqCst)
     }
+
+    /// 记录一次 DMA 分配，供进程退出时统一回收。
+    pub fn record_dma_allocation(
+        &self,
+        user_vaddr: usize,
+        map_size: usize,
+        layout: Layout,
+        dma_info: DMAInfo,
+    ) {
+        self.dma_allocations.lock().push(DmaAllocation {
+            user_vaddr,
+            map_size,
+            layout,
+            dma_info,
+        });
+    }
+
+    /// 释放一条由 `dma_malloc` 建立的 DMA 映射。
+    ///
+    /// 参数 `user_vaddr` 必须是 `dma_malloc` 原样返回的用户虚拟地址：
+    /// - 不能传入偏移后的地址
+    /// - 不能跨进程释放
+    ///
+    /// 返回值：
+    /// - `Ok(true)`: 成功找到并释放
+    /// - `Ok(false)`: 当前进程下没有这条记录
+    /// - `Err(_)`: 解除用户态映射失败，此时会把记录放回表中，避免丢失回收信息
+    pub fn release_dma_allocation(&self, user_vaddr: usize) -> AxResult<bool> {
+        let allocation = {
+            let mut allocations = self.dma_allocations.lock();
+            let Some(index) = allocations
+                .iter()
+                .position(|allocation| allocation.user_vaddr == user_vaddr)
+            else {
+                return Ok(false);
+            };
+            allocations.remove(index)
+        };
+
+        let unmap_result = {
+            let mut aspace = self.aspace.lock();
+            aspace.unmap(VirtAddr::from(allocation.user_vaddr), allocation.map_size)
+        };
+
+        if let Err(err) = unmap_result {
+            self.dma_allocations.lock().push(allocation);
+            return Err(err);
+        }
+
+        unsafe {
+            dealloc_coherent(allocation.dma_info, allocation.layout);
+        }
+
+        Ok(true)
+    }
+
+    /// 返回当前进程预留的 NPU 脏位。
+    pub fn npu_isdirty(&self) -> bool {
+        self.npu_isdirty.load(Ordering::Acquire)
+    }
+
+    /// 更新当前进程预留的 NPU 脏位。
+    pub fn set_npu_isdirty(&self, value: bool) {
+        self.npu_isdirty.store(value, Ordering::Release);
+    }
+}
+
+impl Drop for ProcessData {
+    fn drop(&mut self) {
+        let allocations = core::mem::take(&mut *self.dma_allocations.lock());
+        if allocations.is_empty() {
+            return;
+        }
+
+        {
+            let mut aspace = self.aspace.lock();
+            for allocation in &allocations {
+                if let Err(err) =
+                    aspace.unmap(VirtAddr::from(allocation.user_vaddr), allocation.map_size)
+                {
+                    warn!(
+                        "failed to unmap DMA memory for process {} at {:#x}: {:?}",
+                        self.proc.pid(),
+                        allocation.user_vaddr,
+                        err
+                    );
+                }
+            }
+        }
+
+        for allocation in allocations {
+            // 先撤销用户空间映射，再归还 coherent DMA 内存。
+            unsafe {
+                dealloc_coherent(allocation.dma_info, allocation.layout);
+            }
+        }
+    }
 }
 
 struct FutexTables {
     map: HashMap<usize, Arc<FutexTable>>,
     operations: usize,
 }
+
 impl FutexTables {
     fn new() -> Self {
         Self {
@@ -455,7 +583,7 @@ pub fn get_session(sid: Pid) -> AxResult<Arc<Session>> {
     SESSION_TABLE.read().get(&sid).ok_or(AxError::NoSuchProcess)
 }
 
-/// Poll the timer
+/// Poll the timer.
 pub fn poll_timer(task: &TaskInner) {
     let Some(thr) = task.try_as_thread() else {
         return;

@@ -292,6 +292,8 @@ struct rknpu_action {
 #define RKNPU_MEM_MAP 0x03
 #define RKNPU_MEM_DESTROY 0x04
 #define RKNPU_MEM_SYNC 0x05
+/* 调试辅助命令：按当前 owner 视角打印进程级 NPU 状态。 */
+#define RKNPU_DUMP_STATUS 0x06
 
 #define RKNPU_IOC_MAGIC 'r'
 #define RKNPU_IOW(nr, type) _IOW(RKNPU_IOC_MAGIC, nr, type)
@@ -312,6 +314,9 @@ struct rknpu_action {
         DRM_IOWR(DRM_COMMAND_BASE + RKNPU_MEM_DESTROY, struct rknpu_mem_destroy)
 #define DRM_IOCTL_RKNPU_MEM_SYNC                                               \
         DRM_IOWR(DRM_COMMAND_BASE + RKNPU_MEM_SYNC, struct rknpu_mem_sync)
+/* DRM 版本的状态导出 ioctl，参数沿用 `struct rknpu_submit`。 */
+#define DRM_IOCTL_RKNPU_DUMP_STATUS                                            \
+        DRM_IOWR(DRM_COMMAND_BASE + RKNPU_DUMP_STATUS, struct rknpu_submit)
 
 #define IOCTL_RKNPU_ACTION RKNPU_IOWR(RKNPU_ACTION, struct rknpu_action)
 #define IOCTL_RKNPU_SUBMIT RKNPU_IOWR(RKNPU_SUBMIT, struct rknpu_submit)
@@ -321,5 +326,8 @@ struct rknpu_action {
 #define IOCTL_RKNPU_MEM_DESTROY                                                \
         RKNPU_IOWR(RKNPU_MEM_DESTROY, struct rknpu_mem_destroy)
 #define IOCTL_RKNPU_MEM_SYNC RKNPU_IOWR(RKNPU_MEM_SYNC, struct rknpu_mem_sync)
+/* 非 DRM 包装下的状态导出 ioctl。 */
+#define IOCTL_RKNPU_DUMP_STATUS                                                \
+        RKNPU_IOWR(RKNPU_DUMP_STATUS, struct rknpu_submit)
 
 #endif // RKNPU_IOCTL_H

@@ -66,22 +66,26 @@ use core::{
 mod config;
 mod data;
 mod err;
-mod registers;
 mod gem;
 mod job;
 mod osal;
+mod registers;
+pub mod status;
 mod task;
-use alloc::vec::Vec;
+use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
 pub use config::*;
 pub use err::*;
 pub use gem::*;
 pub use job::*;
 pub use osal::*;
 use rdif_base::DriverGeneric;
+use spin::Mutex;
+pub use status::*;
 pub use task::*;
 pub mod ioctrl;
+use crate::data::RknpuData;
+use crate::ioctrl::RknpuSubmit;
 use crate::registers::RknpuCore;
-use crate::{data::RknpuData};
 
 const VERSION_MAJOR: u32 = 0;
 const VERSION_MINOR: u32 = 9;
@@ -89,6 +93,130 @@ const VERSION_PATCH: u32 = 8;
 
 const fn version(major: u32, minor: u32, patch: u32) -> u32 {
     major * 10000 + minor * 100 + patch
+}
+
+/// 记录当前实际驻留在 NPU 硬件上的 owner 以及它最近一次进入驱动时的 submit 镜像。
+///
+/// 这里的 `last_submit` 不是历史归档，而是“如果下一次发生 owner 切换，
+/// 我们应该从哪份 submit 快照里读取上一位 owner 的最新进度”。
+#[derive(Debug, Clone)]
+pub(crate) struct ResidentOwnerState {
+    /// 当前驻留在硬件上的 task/process/address-space 三元组。
+    pub(crate) owner: NpuOwnerIds,
+    /// 该 owner 最近一次进入 step-submit 时携带的 submit 进度镜像。
+    pub(crate) last_submit: RknpuSubmit,
+}
+
+/// submit 路径和 IRQ 路径共享的软状态容器。
+///
+/// 设计目的：
+/// - 在普通线程上下文里预注册 `(owner, core)` 槽位，避免 IRQ 上下文首次插入 map；
+/// - 跟踪每个硬件 core 当前属于哪个 owner；
+/// - 在 owner 切换时保存“单次 submit 尚未完成”的软件恢复点。
+pub(crate) struct RknpuSharedState {
+    /// 按 `(owner, core)` 保存最近一次 IRQ 边界快照和恢复校验结果。
+    pub(crate) task_npu_state: Mutex<BTreeMap<TaskNpuStateKey, TaskNpuState>>,
+    /// 记录每个硬件 core 当前正在替哪个 owner 跑哪一个 task。
+    active_binding: Mutex<[Option<ActiveCoreBinding>; NPU_MAX_CORES]>,
+    /// 保存每个 owner 最近一次离开硬件时的软件级 submit 上下文。
+    owner_contexts: Mutex<BTreeMap<NpuOwnerIds, NpuContext>>,
+    /// 当前实际驻留在硬件上的 owner。
+    resident_owner: Mutex<Option<ResidentOwnerState>>,
+}
+
+impl RknpuSharedState {
+    /// 初始化 submit/IRQ 共用的共享状态。
+    pub(crate) fn new() -> Self {
+        Self {
+            task_npu_state: Mutex::new(BTreeMap::new()),
+            active_binding: Mutex::new([None; NPU_MAX_CORES]),
+            owner_contexts: Mutex::new(BTreeMap::new()),
+            resident_owner: Mutex::new(None),
+        }
+    }
+
+    /// 预注册某个 `(owner, core)` 的状态槽位。
+    ///
+    /// 这样 IRQ 到来时只需要覆盖旧值，不必在中断上下文里第一次分配/插入。
+    pub(crate) fn ensure_task_state_entry(&self, key: TaskNpuStateKey) {
+        let mut states = self.task_npu_state.lock();
+        states.entry(key).or_insert_with(|| TaskNpuState {
+            key,
+            ..TaskNpuState::default()
+        });
+    }
+
+    /// 在某个 core 即将启动新 task 前，同时更新活动绑定和对应的 task 状态初值。
+    pub(crate) fn prepare_active_binding(
+        &self,
+        binding: ActiveCoreBinding,
+        task_state: TaskNpuState,
+    ) {
+        {
+            let mut states = self.task_npu_state.lock();
+            states.insert(binding.key, task_state);
+        }
+        let mut bindings = self.active_binding.lock();
+        let core_slot = binding.key.core_slot as usize;
+        if core_slot < bindings.len() {
+            bindings[core_slot] = Some(binding);
+        }
+    }
+
+    /// 读取某个硬件 core 当前绑定到哪个 owner。
+    pub(crate) fn active_binding(&self, core_slot: usize) -> Option<ActiveCoreBinding> {
+        let bindings = self.active_binding.lock();
+        bindings.get(core_slot).copied().flatten()
+    }
+
+    /// 清空单个 core 的活动绑定。
+    pub(crate) fn clear_active_binding(&self, core_slot: usize) {
+        let mut bindings = self.active_binding.lock();
+        if core_slot < bindings.len() {
+            bindings[core_slot] = None;
+        }
+    }
+
+    /// 批量清空前 `max_cores` 个 core 的活动绑定。
+    pub(crate) fn clear_active_bindings(&self, max_cores: usize) {
+        let mut bindings = self.active_binding.lock();
+        for idx in 0..bindings.len().min(max_cores) {
+            bindings[idx] = None;
+        }
+    }
+
+    /// 判断某个 owner 是否已经有保存好的软件上下文。
+    pub(crate) fn has_owner_context(&self, owner: NpuOwnerIds) -> bool {
+        self.owner_contexts.lock().contains_key(&owner)
+    }
+
+    /// 保证 owner 上下文表里至少有一个默认槽位。
+    pub(crate) fn ensure_owner_context(&self, owner: NpuOwnerIds) {
+        self.owner_contexts
+            .lock()
+            .entry(owner)
+            .or_insert_with(NpuContext::default);
+    }
+
+    /// 读取某个 owner 最近一次保存的 submit 上下文。
+    pub(crate) fn owner_context(&self, owner: NpuOwnerIds) -> Option<NpuContext> {
+        self.owner_contexts.lock().get(&owner).cloned()
+    }
+
+    /// 覆盖保存某个 owner 的最新 submit 上下文。
+    pub(crate) fn save_owner_context(&self, owner: NpuOwnerIds, context: NpuContext) {
+        self.owner_contexts.lock().insert(owner, context);
+    }
+
+    /// 读取当前驻留在硬件上的 owner。
+    pub(crate) fn resident_owner(&self) -> Option<ResidentOwnerState> {
+        self.resident_owner.lock().clone()
+    }
+
+    /// 更新当前驻留在硬件上的 owner。
+    pub(crate) fn set_resident_owner(&self, owner: Option<ResidentOwnerState>) {
+        *self.resident_owner.lock() = owner;
+    }
 }
 
 /// 可以通过 [`Rknpu::action()`] 请求的硬件操作。
@@ -156,6 +284,8 @@ pub struct Rknpu {
     iommu_enabled: bool,
     /// DMA buffer pool shared with userspace (see [`gem`] module).
     pub(crate) gem: GemPool,
+    /// submit/IRQ 共享的任务级快照与 owner/core 绑定状态。
+    pub(crate) shared: Arc<RknpuSharedState>,
     /// 用于中断驱动模式的可选平台提供的等待函数。
     ///
     /// - `None`（默认）→ 直接忙轮询 MMIO 寄存器。
@@ -166,7 +296,6 @@ pub struct Rknpu {
 }
 
 impl Rknpu {
-
     /// 从原始 MMIO 基地址创建新的 RKNPU 接口。
     ///
     /// # 安全性
@@ -175,16 +304,21 @@ impl Rknpu {
     /// 物理地址，并且在返回结构的生命周期内保持有效。
     pub fn new(base_addrs: &[NonNull<u8>], config: RknpuConfig) -> Self {
         let data = RknpuData::new(config.rknpu_type);
+        let shared = Arc::new(RknpuSharedState::new());
 
         Self {
             base: base_addrs
                 .iter()
-                .map(|&addr| unsafe { RknpuCore::new(addr) })
+                .enumerate()
+                .map(|(core_slot, &addr)| unsafe {
+                    RknpuCore::new(addr, core_slot as u8, shared.clone())
+                })
                 .collect(),
             data,
             config,
             iommu_enabled: false,
             gem: GemPool::new(),
+            shared,
             wait_fn: None,
         }
     }
@@ -210,7 +344,7 @@ impl Rknpu {
     ///
     /// 提供的函数必须在**任何**中断触发时返回（包括 NPU 中断）。
     /// AArch64 上的 `WFI` 满足此要求。
-    /// 平台还必须在调用此函数之前通过 [`new_irq_handler`](Rknpu::new_irq_handler) 
+    /// 平台还必须在调用此函数之前通过 [`new_irq_handler`](Rknpu::new_irq_handler)
     /// 注册 NPU IRQ。
     pub fn set_wait_fn(&mut self, f: fn()) {
         warn!("[NPU] Interrupt-driven mode enabled (WFI)");
@@ -449,7 +583,7 @@ impl Rknpu {
 
     /// 为一个核心创建轻量级的 `Send + Sync` 中断处理程序。
     ///
-    /// 当平台 IRQ 框架需要一个可以从中断上下文调用的对象而不持有 
+    /// 当平台 IRQ 框架需要一个可以从中断上下文调用的对象而不持有
     /// `&mut Rknpu` 时，这很有用。
     pub fn new_irq_handler(&self, core_idx: usize) -> RknpuIrqHandler {
         RknpuIrqHandler(self.base[core_idx].clone())
@@ -459,7 +593,7 @@ impl Rknpu {
 /// 单个 NPU 核心的轻量级中断处理程序。
 ///
 /// 从 [`Rknpu`] 克隆，可以安全地从 IRQ 上下文调用。
-/// 仅读取 INTERRUPT_STATUS 并写入 INTERRUPT_CLEAR — 
+/// 仅读取 INTERRUPT_STATUS 并写入 INTERRUPT_CLEAR —
 /// 没有内存分配或阻塞。
 pub struct RknpuIrqHandler(RknpuCore);
 
@@ -494,5 +628,103 @@ impl Deref for Rknpu {
 impl DerefMut for Rknpu {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.gem
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepare_active_binding_overwrites_existing_task_state() {
+        let shared = RknpuSharedState::new();
+        let key = TaskNpuStateKey {
+            owner: NpuOwnerIds {
+                task_id: 11,
+                process_id: 22,
+                address_space_id: 33,
+            },
+            core_slot: 0,
+        };
+        let binding = ActiveCoreBinding {
+            key,
+            subcore_slot: 0,
+            batch_task_start: 0,
+            batch_task_count: 1,
+            current_task_index: 0,
+            expected_irq_mask: 0x300,
+        };
+
+        shared.prepare_active_binding(
+            binding,
+            TaskNpuState {
+                key,
+                current_task_index: 1,
+                ..TaskNpuState::default()
+            },
+        );
+        shared.prepare_active_binding(
+            binding,
+            TaskNpuState {
+                key,
+                current_task_index: 7,
+                ..TaskNpuState::default()
+            },
+        );
+
+        let states = shared.task_npu_state.lock();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states.get(&key).unwrap().current_task_index, 7);
+    }
+
+    #[test]
+    fn owner_contexts_keep_latest_saved_context() {
+        let shared = RknpuSharedState::new();
+        let owner = NpuOwnerIds {
+            task_id: 101,
+            process_id: 202,
+            address_space_id: 303,
+        };
+
+        assert!(!shared.has_owner_context(owner));
+        shared.ensure_owner_context(owner);
+        assert!(shared.has_owner_context(owner));
+
+        let mut context = NpuContext::default();
+        context.submit.flags = 0x55;
+        context.submit.task_number = 3;
+        shared.save_owner_context(owner, context);
+
+        let saved = shared
+            .owner_context(owner)
+            .expect("owner context should exist");
+        assert_eq!(saved.submit.flags, 0x55);
+        assert_eq!(saved.submit.task_number, 3);
+    }
+
+    #[test]
+    fn resident_owner_state_is_replaceable() {
+        let shared = RknpuSharedState::new();
+        let owner = NpuOwnerIds {
+            task_id: 1,
+            process_id: 2,
+            address_space_id: 3,
+        };
+        let mut submit = RknpuSubmit::default();
+        submit.task_number = 4;
+
+        shared.set_resident_owner(Some(ResidentOwnerState {
+            owner,
+            last_submit: submit.clone(),
+        }));
+
+        let resident = shared
+            .resident_owner()
+            .expect("resident owner must be present");
+        assert_eq!(resident.owner, owner);
+        assert_eq!(resident.last_submit.task_number, 4);
+
+        shared.set_resident_owner(None);
+        assert!(shared.resident_owner().is_none());
     }
 }

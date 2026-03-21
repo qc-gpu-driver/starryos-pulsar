@@ -243,6 +243,8 @@ pub enum RknpuCmd {
     MemDestroy = 0x04,
     /// Memory sync command
     MemSync    = 0x05,
+    /// Dump current process-level NPU status
+    DumpStatus = 0x06,
 }
 
 impl TryFrom<u32> for RknpuCmd {
@@ -257,6 +259,7 @@ impl TryFrom<u32> for RknpuCmd {
             0x03 | 0x43 => Ok(RknpuCmd::MemMap),
             0x04 | 0x44 => Ok(RknpuCmd::MemDestroy),
             0x05 | 0x45 => Ok(RknpuCmd::MemSync),
+            0x06 | 0x46 => Ok(RknpuCmd::DumpStatus),
             _ => {
                 warn!("Unknown ioctl nr: {nr:#x}",);
                 Err(())

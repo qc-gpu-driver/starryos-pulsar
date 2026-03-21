@@ -32,9 +32,12 @@ use dma_api::{DVec, Direction};
 use crate::{JobMode, op::Operation};
 
 pub mod cna;
-mod def;
+pub(crate) mod def;
 pub mod dpu;
+pub mod npu_context;
 pub mod op;
+
+pub use npu_context::{NpuContext, ProcessNpuState};
 
 /// 任务批次的共享参数 — 独立于实际的 regcmd 数据。
 #[derive(Debug, Clone)]
@@ -93,7 +96,7 @@ pub struct Submit {
 impl Submit {
     /// 从操作列表构建提交。
     ///
-    /// 这会分配 DMA regcmd 缓冲区，调用每个操作的 `fill_regcmd` 
+    /// 这会分配 DMA regcmd 缓冲区，调用每个操作的 `fill_regcmd`
     /// 来填充其切片，并刷新缓存。
     pub fn new(tasks: Vec<Operation>) -> Self {
         let base = SubmitBase {

@@ -3,6 +3,7 @@ mod io_mpx;
 mod ipc;
 mod mm;
 mod net;
+mod npu;
 mod resources;
 mod signal;
 mod sync;
@@ -10,22 +11,57 @@ mod sys;
 mod task;
 mod time;
 
+// Custom syscall numbers for NPU coprocessor
+const SYS_DMA_MALLOC: usize = 400;
+const SYS_DMA_FREE: usize = 401;
+const SYS_RESOLVE_NPU: usize = 402;
+const SYS_DUMP_NPU_STATUS: usize = 403;
+
 use axerrno::{AxError, LinuxError};
 use axhal::uspace::UserContext;
 use syscalls::Sysno;
 
 use self::{
-    fs::*, io_mpx::*, ipc::*, mm::*, net::*, resources::*, signal::*, sync::*, sys::*, task::*,
-    time::*,
+    fs::*, io_mpx::*, ipc::*, mm::*, net::*, npu::*, resources::*, signal::*, sync::*, sys::*,
+    task::*, time::*,
 };
 
 pub fn handle_syscall(uctx: &mut UserContext) {
-    let Some(sysno) = Sysno::new(uctx.sysno()) else {
-        warn!("Invalid syscall number: {}", uctx.sysno());
+    let raw_sysno = uctx.sysno();
+
+    if raw_sysno == SYS_DMA_MALLOC {
+        trace!("Syscall SYS_DMA_MALLOC");
+        let result = sys_dma_malloc(uctx.arg0() as _, uctx.arg1() as _);
+        uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).code() as _) as _);
+        return;
+    }
+
+    if raw_sysno == SYS_DMA_FREE {
+        trace!("Syscall SYS_DMA_FREE");
+        let result = sys_dma_free(uctx.arg0() as _);
+        uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).code() as _) as _);
+        return;
+    }
+
+    if raw_sysno == SYS_RESOLVE_NPU {
+        trace!("Syscall SYS_RESOLVE_NPU");
+        let result = sys_resolve_npu(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _);
+        uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).code() as _) as _);
+        return;
+    }
+
+    if raw_sysno == SYS_DUMP_NPU_STATUS {
+        trace!("Syscall SYS_DUMP_NPU_STATUS");
+        let result = sys_dump_npu_status(uctx.arg0() as _);
+        uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).code() as _) as _);
+        return;
+    }
+
+    let Some(sysno) = Sysno::new(raw_sysno) else {
+        warn!("Invalid syscall number: {}", raw_sysno);
         uctx.set_retval(-LinuxError::ENOSYS.code() as _);
         return;
     };
-
     trace!("Syscall {:?}", sysno);
 
     let result = match sysno {

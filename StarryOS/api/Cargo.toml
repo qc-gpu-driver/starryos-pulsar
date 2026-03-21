@@ -17,6 +17,7 @@ axbacktrace.workspace = true
 axconfig.workspace = true
 axdisplay.workspace = true
 axdriver.workspace = true
+axdma.workspace = true
 axerrno.workspace = true
 axfeat.workspace = true
 axfs-ng-vfs.workspace = true
