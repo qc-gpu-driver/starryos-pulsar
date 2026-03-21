@@ -2,7 +2,7 @@
 
 ## 工作总结
 
-- **阶段性代码提交** — 本周完成一次阶段性代码提交 `1d4e8fe`，提交内容包括 DMA syscall、`StarryOS/demo` 用户态测试、`demo/` 下的多进程与混合负载测例、`rknpu` 驱动的单 task 边界调度，以及进程级 NPU 状态导出接口；同时将“硬件寄存器级保存/恢复、毒值写坏、读回校验”实验路径从当前热路径中注释保留，不纳入本次可运行提交。提交链接：[待补充](#)
+- **阶段性代码提交** — 本周完成一次阶段性代码提交 `1d4e8fe`，提交内容包括 DMA syscall、`StarryOS/demo` 用户态测试、`demo/` 下的多进程与混合负载测例、`rknpu` 驱动的单 task 边界调度，以及进程级 NPU 状态导出接口；同时将“硬件寄存器级保存/恢复、毒值写坏、读回校验”实验路径从当前热路径中注释保留，不纳入本次可运行提交。提交链接：[Commit](https://github.com/qc-gpu-driver/starryos-pulsar/commit/1d4e8fea8a5459bef7cff3d9eb0ec2a7dadfa472)
 - **NPU 提交路径支持单 task 边界切换** — 将 `submit_ioctrl` 改造成可步进推进的提交路径，在每个 task 完成 IRQ 边界主动让出 CPU，使多个进程可以轮流推进各自未完成的 submit
 - **DMA syscall 与用户态辅助库打通** — 新增 `sys_dma_malloc`、`sys_dma_free`、`sys_dump_npu_status`，补齐 DMA 分配、释放和驱动状态导出的最小用户态链路
 - **新增多进程/混合工作负载验证** — 新增 `matmul_multi_process` 与 `matmul_llama_concurrent` 两个测试程序，板端验证多进程交错提交和 llama 推理并发场景
