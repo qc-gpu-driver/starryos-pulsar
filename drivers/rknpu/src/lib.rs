@@ -41,8 +41,8 @@
 //! 3. **准备** — 用户空间（或 `task/` 模块）填充 `RknpuTask[]` 描述符
 //!    和寄存器命令缓冲区，为每个神经网络层对每个流水线阶段
 //!    （CNA、MAC、DPU）进行编程。
-//! 4. **SUBMIT** — 驱动刷新缓存，使用命令缓冲区地址和任务计数对 PC 模块
-//!    进行编程，并启动执行（参见 [`ioctrl::Rknpu::submit_ioctrl`]）。
+//! 4. **SUBMIT** — 驱动刷新缓存，按单 core / 单 task dispatch 对 PC 模块进行编程并启动执行
+//!    （参见 [`ioctrl::Rknpu::submit_ioctrl_step`]）。
 //! 5. **轮询/IRQ** — 驱动等待 PC 的中断状态位发出完成信号，
 //!    清除它们，并将控制权返回给用户空间。
 //! 6. **读取结果** — 用户空间从 DMA 缓冲区读取输出张量。
@@ -61,6 +61,7 @@ extern crate log;
 use core::{
     ops::{Deref, DerefMut},
     ptr::NonNull,
+    sync::atomic::Ordering,
 };
 
 mod config;
@@ -72,19 +73,17 @@ mod osal;
 mod registers;
 pub mod status;
 mod task;
-use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
+use alloc::vec::Vec;
 pub use config::*;
 pub use err::*;
 pub use gem::*;
 pub use job::*;
 pub use osal::*;
 use rdif_base::DriverGeneric;
-use spin::Mutex;
 pub use status::*;
 pub use task::*;
 pub mod ioctrl;
 use crate::data::RknpuData;
-use crate::ioctrl::RknpuSubmit;
 use crate::registers::RknpuCore;
 
 const VERSION_MAJOR: u32 = 0;
@@ -93,130 +92,6 @@ const VERSION_PATCH: u32 = 8;
 
 const fn version(major: u32, minor: u32, patch: u32) -> u32 {
     major * 10000 + minor * 100 + patch
-}
-
-/// 记录当前实际驻留在 NPU 硬件上的 owner 以及它最近一次进入驱动时的 submit 镜像。
-///
-/// 这里的 `last_submit` 不是历史归档，而是“如果下一次发生 owner 切换，
-/// 我们应该从哪份 submit 快照里读取上一位 owner 的最新进度”。
-#[derive(Debug, Clone)]
-pub(crate) struct ResidentOwnerState {
-    /// 当前驻留在硬件上的 task/process/address-space 三元组。
-    pub(crate) owner: NpuOwnerIds,
-    /// 该 owner 最近一次进入 step-submit 时携带的 submit 进度镜像。
-    pub(crate) last_submit: RknpuSubmit,
-}
-
-/// submit 路径和 IRQ 路径共享的软状态容器。
-///
-/// 设计目的：
-/// - 在普通线程上下文里预注册 `(owner, core)` 槽位，避免 IRQ 上下文首次插入 map；
-/// - 跟踪每个硬件 core 当前属于哪个 owner；
-/// - 在 owner 切换时保存“单次 submit 尚未完成”的软件恢复点。
-pub(crate) struct RknpuSharedState {
-    /// 按 `(owner, core)` 保存最近一次 IRQ 边界快照和恢复校验结果。
-    pub(crate) task_npu_state: Mutex<BTreeMap<TaskNpuStateKey, TaskNpuState>>,
-    /// 记录每个硬件 core 当前正在替哪个 owner 跑哪一个 task。
-    active_binding: Mutex<[Option<ActiveCoreBinding>; NPU_MAX_CORES]>,
-    /// 保存每个 owner 最近一次离开硬件时的软件级 submit 上下文。
-    owner_contexts: Mutex<BTreeMap<NpuOwnerIds, NpuContext>>,
-    /// 当前实际驻留在硬件上的 owner。
-    resident_owner: Mutex<Option<ResidentOwnerState>>,
-}
-
-impl RknpuSharedState {
-    /// 初始化 submit/IRQ 共用的共享状态。
-    pub(crate) fn new() -> Self {
-        Self {
-            task_npu_state: Mutex::new(BTreeMap::new()),
-            active_binding: Mutex::new([None; NPU_MAX_CORES]),
-            owner_contexts: Mutex::new(BTreeMap::new()),
-            resident_owner: Mutex::new(None),
-        }
-    }
-
-    /// 预注册某个 `(owner, core)` 的状态槽位。
-    ///
-    /// 这样 IRQ 到来时只需要覆盖旧值，不必在中断上下文里第一次分配/插入。
-    pub(crate) fn ensure_task_state_entry(&self, key: TaskNpuStateKey) {
-        let mut states = self.task_npu_state.lock();
-        states.entry(key).or_insert_with(|| TaskNpuState {
-            key,
-            ..TaskNpuState::default()
-        });
-    }
-
-    /// 在某个 core 即将启动新 task 前，同时更新活动绑定和对应的 task 状态初值。
-    pub(crate) fn prepare_active_binding(
-        &self,
-        binding: ActiveCoreBinding,
-        task_state: TaskNpuState,
-    ) {
-        {
-            let mut states = self.task_npu_state.lock();
-            states.insert(binding.key, task_state);
-        }
-        let mut bindings = self.active_binding.lock();
-        let core_slot = binding.key.core_slot as usize;
-        if core_slot < bindings.len() {
-            bindings[core_slot] = Some(binding);
-        }
-    }
-
-    /// 读取某个硬件 core 当前绑定到哪个 owner。
-    pub(crate) fn active_binding(&self, core_slot: usize) -> Option<ActiveCoreBinding> {
-        let bindings = self.active_binding.lock();
-        bindings.get(core_slot).copied().flatten()
-    }
-
-    /// 清空单个 core 的活动绑定。
-    pub(crate) fn clear_active_binding(&self, core_slot: usize) {
-        let mut bindings = self.active_binding.lock();
-        if core_slot < bindings.len() {
-            bindings[core_slot] = None;
-        }
-    }
-
-    /// 批量清空前 `max_cores` 个 core 的活动绑定。
-    pub(crate) fn clear_active_bindings(&self, max_cores: usize) {
-        let mut bindings = self.active_binding.lock();
-        for idx in 0..bindings.len().min(max_cores) {
-            bindings[idx] = None;
-        }
-    }
-
-    /// 判断某个 owner 是否已经有保存好的软件上下文。
-    pub(crate) fn has_owner_context(&self, owner: NpuOwnerIds) -> bool {
-        self.owner_contexts.lock().contains_key(&owner)
-    }
-
-    /// 保证 owner 上下文表里至少有一个默认槽位。
-    pub(crate) fn ensure_owner_context(&self, owner: NpuOwnerIds) {
-        self.owner_contexts
-            .lock()
-            .entry(owner)
-            .or_insert_with(NpuContext::default);
-    }
-
-    /// 读取某个 owner 最近一次保存的 submit 上下文。
-    pub(crate) fn owner_context(&self, owner: NpuOwnerIds) -> Option<NpuContext> {
-        self.owner_contexts.lock().get(&owner).cloned()
-    }
-
-    /// 覆盖保存某个 owner 的最新 submit 上下文。
-    pub(crate) fn save_owner_context(&self, owner: NpuOwnerIds, context: NpuContext) {
-        self.owner_contexts.lock().insert(owner, context);
-    }
-
-    /// 读取当前驻留在硬件上的 owner。
-    pub(crate) fn resident_owner(&self) -> Option<ResidentOwnerState> {
-        self.resident_owner.lock().clone()
-    }
-
-    /// 更新当前驻留在硬件上的 owner。
-    pub(crate) fn set_resident_owner(&self, owner: Option<ResidentOwnerState>) {
-        *self.resident_owner.lock() = owner;
-    }
 }
 
 /// 可以通过 [`Rknpu::action()`] 请求的硬件操作。
@@ -282,10 +157,14 @@ pub struct Rknpu {
     data: RknpuData,
     /// NPU 和系统内存之间是否有活动的 IOMMU。
     iommu_enabled: bool,
+    /// Current logical IOMMU domain id exposed through the action ioctl.
+    ///
+    /// StarryOS does not yet wire this to a real domain-switching backend, but
+    /// keeping the state here preserves the userspace-visible contract and
+    /// mirrors the Linux driver shape.
+    iommu_domain_id: i32,
     /// DMA buffer pool shared with userspace (see [`gem`] module).
     pub(crate) gem: GemPool,
-    /// submit/IRQ 共享的任务级快照与 owner/core 绑定状态。
-    pub(crate) shared: Arc<RknpuSharedState>,
     /// 用于中断驱动模式的可选平台提供的等待函数。
     ///
     /// - `None`（默认）→ 直接忙轮询 MMIO 寄存器。
@@ -304,21 +183,18 @@ impl Rknpu {
     /// 物理地址，并且在返回结构的生命周期内保持有效。
     pub fn new(base_addrs: &[NonNull<u8>], config: RknpuConfig) -> Self {
         let data = RknpuData::new(config.rknpu_type);
-        let shared = Arc::new(RknpuSharedState::new());
 
         Self {
             base: base_addrs
                 .iter()
                 .enumerate()
-                .map(|(core_slot, &addr)| unsafe {
-                    RknpuCore::new(addr, core_slot as u8, shared.clone())
-                })
+                .map(|(core_slot, &addr)| unsafe { RknpuCore::new(addr, core_slot as u8) })
                 .collect(),
             data,
             config,
             iommu_enabled: false,
+            iommu_domain_id: 0,
             gem: GemPool::new(),
-            shared,
             wait_fn: None,
         }
     }
@@ -358,6 +234,15 @@ impl Rknpu {
 
     pub fn get_hw_version(&self) -> u32 {
         self.base[0].version()
+    }
+
+    fn read_core_u32(&self, core_slot: usize, offset: u16) -> u32 {
+        unsafe {
+            self.base[core_slot]
+                .offset_ptr::<u32>(offset as usize)
+                .as_ptr()
+                .read_volatile()
+        }
     }
 
     pub fn clear_rw_amount(&mut self) -> Result<(), RknpuError> {
@@ -409,117 +294,188 @@ impl Rknpu {
         Ok(())
     }
 
+    pub fn get_rw_amount(
+        &self,
+        dt_wr: Option<&mut u32>,
+        dt_rd: Option<&mut u32>,
+        wt_rd: Option<&mut u32>,
+    ) -> Result<(), RknpuError> {
+        let Some(amount_top) = self.data.amount_top else {
+            warn!("Get rw_amount is not supported on this device!");
+            return Ok(());
+        };
+
+        let amount_scale = self.data.pc_data_amount_scale;
+        let amount_core = self.data.amount_core;
+
+        if let Some(dt_wr) = dt_wr {
+            *dt_wr = self
+                .read_core_u32(0, amount_top.offset_dt_wr)
+                .saturating_mul(amount_scale);
+            if let Some(amount_core) = amount_core {
+                *dt_wr = dt_wr.saturating_add(
+                    self.read_core_u32(0, amount_core.offset_dt_wr)
+                        .saturating_mul(amount_scale),
+                );
+            }
+        }
+
+        if let Some(dt_rd) = dt_rd {
+            *dt_rd = self
+                .read_core_u32(0, amount_top.offset_dt_rd)
+                .saturating_mul(amount_scale);
+            if let Some(amount_core) = amount_core {
+                *dt_rd = dt_rd.saturating_add(
+                    self.read_core_u32(0, amount_core.offset_dt_rd)
+                        .saturating_mul(amount_scale),
+                );
+            }
+        }
+
+        if let Some(wt_rd) = wt_rd {
+            *wt_rd = self
+                .read_core_u32(0, amount_top.offset_wt_rd)
+                .saturating_mul(amount_scale);
+            if let Some(amount_core) = amount_core {
+                *wt_rd = wt_rd.saturating_add(
+                    self.read_core_u32(0, amount_core.offset_wt_rd)
+                        .saturating_mul(amount_scale),
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn get_total_rw_amount(&self) -> Result<u32, RknpuError> {
+        let Some(_amount_top) = self.data.amount_top else {
+            warn!("Get total_rw_amount is not supported on this device!");
+            return Ok(0);
+        };
+
+        let mut dt_wr = 0;
+        let mut dt_rd = 0;
+        let mut wt_rd = 0;
+        self.get_rw_amount(Some(&mut dt_wr), Some(&mut dt_rd), Some(&mut wt_rd))?;
+        Ok(dt_wr.saturating_add(dt_rd).saturating_add(wt_rd))
+    }
+
+    pub fn soft_reset(&mut self) -> Result<(), RknpuError> {
+        // Linux performs a full reset-controller dance here. StarryOS does not
+        // yet have that platform plumbing in this crate, so the best-effort
+        // reset path clears every core's pending IRQ state and published
+        // completion shadow.
+        for core in &self.base {
+            core.clean_interrupts();
+            core.drain_pending_interrupts();
+            core.irq_status.store(0, Ordering::Release);
+        }
+        Ok(())
+    }
+
     /// 根据提供的操作请求执行 RKNPU 操作
     ///
     /// 此函数镜像了 Linux 驱动的 rknpu_action 实现，
     /// 为硬件操作提供 Rust 安全接口。
-    pub fn action(&mut self, action: RknpuAction) -> Result<u32, RknpuError> {
+    pub fn action(&mut self, action: RknpuAction, value: u32) -> Result<u32, RknpuError> {
         match action {
-            RknpuAction::GetHwVersion => {
-                let val = self.get_hw_version();
-                Ok(val)
-            }
+            RknpuAction::GetHwVersion => Ok(self.get_hw_version()),
             RknpuAction::GetDrvVersion => Ok(version(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH)),
             RknpuAction::GetFreq => {
-                // TODO FPGA频率获取
-                Ok(0)
+                warn!("GetFreq requires platform clock integration");
+                Err(RknpuError::NotSupported)
             }
             RknpuAction::SetFreq => {
-                // 频率设置 - 需要时钟管理
-                Ok(0)
+                warn!("SetFreq requires platform clock integration");
+                let _ = value;
+                Err(RknpuError::NotSupported)
             }
             RknpuAction::GetVolt => {
-                // TODO FPGA电压获取
-                Ok(0)
+                warn!("GetVolt requires platform regulator integration");
+                Err(RknpuError::NotSupported)
             }
-            RknpuAction::SetVolt => Err(RknpuError::InternalError),
+            RknpuAction::SetVolt => {
+                warn!("SetVolt requires platform regulator integration");
+                let _ = value;
+                Err(RknpuError::NotSupported)
+            }
             RknpuAction::ActReset => {
-                // TODO FPGA复位操作
+                self.soft_reset()?;
                 Ok(0)
             }
             RknpuAction::GetBwPriority => {
-                // 带宽优先级获取
-                Err(RknpuError::InternalError)
+                warn!("GetBwPriority requires a mapped bw_priority register window");
+                Err(RknpuError::NotSupported)
             }
             RknpuAction::SetBwPriority => {
-                // 带宽优先级设置
-                log::warn!("SetBwPriority operation not yet implemented");
-                Err(RknpuError::InternalError)
+                warn!("SetBwPriority requires a mapped bw_priority register window");
+                let _ = value;
+                Err(RknpuError::NotSupported)
             }
             RknpuAction::GetBwExpect => {
-                // 带宽期望值获取
-                Err(RknpuError::InternalError)
+                warn!("GetBwExpect requires a mapped bw_priority register window");
+                Err(RknpuError::NotSupported)
             }
             RknpuAction::SetBwExpect => {
-                // 带宽期望值设置
-                log::warn!("SetBwExpect operation not yet implemented");
-                Err(RknpuError::InternalError)
+                warn!("SetBwExpect requires a mapped bw_priority register window");
+                let _ = value;
+                Err(RknpuError::NotSupported)
             }
             RknpuAction::GetBwTw => {
-                // 带宽时间窗口获取
-                Err(RknpuError::InternalError)
+                warn!("GetBwTw requires a mapped bw_priority register window");
+                Err(RknpuError::NotSupported)
             }
             RknpuAction::SetBwTw => {
-                // 带宽时间窗口设置
-                Err(RknpuError::InternalError)
+                warn!("SetBwTw requires a mapped bw_priority register window");
+                let _ = value;
+                Err(RknpuError::NotSupported)
             }
             RknpuAction::ActClrTotalRwAmount => {
-                // 清除读写总量统计
                 self.clear_rw_amount()?;
                 Ok(0)
             }
             RknpuAction::GetDtWrAmount => {
-                // 获取设备写数据量
-                warn!("Get rw_amount is not supported on this device!");
-                Ok(0)
+                let mut out = 0;
+                self.get_rw_amount(Some(&mut out), None, None)?;
+                Ok(out)
             }
             RknpuAction::GetDtRdAmount => {
-                // 获取设备读数据量
-                warn!("Get rw_amount is not supported on this device!");
-                Ok(0)
+                let mut out = 0;
+                self.get_rw_amount(None, Some(&mut out), None)?;
+                Ok(out)
             }
             RknpuAction::GetWtRdAmount => {
-                // 获取等待读数据量
-                warn!("Get rw_amount is not supported on this device!");
-                Ok(0)
+                let mut out = 0;
+                self.get_rw_amount(None, None, Some(&mut out))?;
+                Ok(out)
             }
-            RknpuAction::GetTotalRwAmount => {
-                // 获取总读写数据量
-                warn!("Get rw_amount is not supported on this device!");
-                Ok(0)
-            }
-            RknpuAction::GetIommuEn => {
-                // 获取IOMMU启用状态
-                Ok(if self.iommu_enabled { 1 } else { 0 })
-            }
+            RknpuAction::GetTotalRwAmount => self.get_total_rw_amount(),
+            RknpuAction::GetIommuEn => Ok(if self.iommu_enabled { 1 } else { 0 }),
             RknpuAction::SetProcNice => {
-                // 设置进程优先级 - 在内核空间不适用
-                log::warn!("SetProcNice operation not applicable in bare metal context");
+                let nice = i32::from_ne_bytes(value.to_ne_bytes());
+                warn!(
+                    "SetProcNice({}) is not applicable in the bare-metal driver context",
+                    nice
+                );
                 Ok(0)
             }
             RknpuAction::PowerOn => {
-                // 电源开启
-                log::warn!("PowerOn operation not yet implemented");
-                Ok(0)
+                warn!("PowerOn requires platform PM integration");
+                Err(RknpuError::NotSupported)
             }
             RknpuAction::PowerOff => {
-                // 电源关闭
-                log::warn!("PowerOff operation not yet implemented");
-                Ok(0)
+                warn!("PowerOff requires platform PM integration");
+                Err(RknpuError::NotSupported)
             }
-            RknpuAction::GetTotalSramSize => {
-                // 获取总SRAM大小
-                Ok(0)
-            }
+            RknpuAction::GetTotalSramSize => Ok(self.data.nbuf_size as u32),
             RknpuAction::GetFreeSramSize => Ok(self.data.nbuf_size as u32),
-            RknpuAction::GetIommuDomainId => {
-                // 获取IOMMU域ID - 需要IOMMU管理
-                log::warn!("GetIommuDomainId operation not yet implemented");
-                Ok(0)
-            }
+            RknpuAction::GetIommuDomainId => Ok(self.iommu_domain_id as u32),
             RknpuAction::SetIommuDomainId => {
-                // 设置IOMMU域ID - 需要IOMMU管理
-                // log::warn!("SetIommuDomainId operation not yet implemented");
+                let domain_id = i32::from_ne_bytes(value.to_ne_bytes());
+                if !(0..16).contains(&domain_id) {
+                    return Err(RknpuError::InvalidParameter);
+                }
+                self.iommu_domain_id = domain_id;
                 Ok(0)
             }
         }
@@ -567,10 +523,38 @@ impl Rknpu {
 
     /// 将预构建的任务批次提交到核心 0（高级 API）。
     ///
-    /// 与接受原始 ioctl 结构的 `submit_ioctrl` 不同，
+    /// 与 ioctl 路径的单 task 步进不同，
     /// 这接受由 `task/` 模块构建的具有适当 DMA 缓冲区的 [`Submit`]。
     pub fn submit(&mut self, job: &mut Submit) -> Result<(), RknpuError> {
-        self.base[0].submit(&self.data, job)
+        self.base[0].submit(&self.data, self.wait_fn, job)
+    }
+
+    /// Harvests every per-core completion currently published by IRQ handlers.
+    ///
+    /// The scheduler calls this from normal task context. Each returned record
+    /// clears the corresponding active per-core dispatch slot.
+    pub fn harvest_completed_dispatches(&mut self) -> Vec<CoreCompletion> {
+        let mut completed = Vec::new();
+
+        for core_slot in 0..self.base.len().min(NPU_MAX_CORES) {
+            let irq_status = self.base[core_slot].irq_status.load(Ordering::Acquire);
+            if irq_status == 0 {
+                continue;
+            }
+
+            self.base[core_slot].irq_status.store(0, Ordering::Release);
+            debug!(
+                "[NPU] harvest_completed_dispatches core{} irq_status={:#x} observed={:#x}",
+                core_slot, irq_status, irq_status
+            );
+
+            completed.push(CoreCompletion {
+                core_slot: core_slot as u8,
+                observed_irq_status: irq_status,
+            });
+        }
+
+        completed
     }
 
     /// 读取并清除核心 0 上的挂起中断。
@@ -635,96 +619,90 @@ impl DerefMut for Rknpu {
 mod tests {
     use super::*;
 
-    #[test]
-    fn prepare_active_binding_overwrites_existing_task_state() {
-        let shared = RknpuSharedState::new();
-        let key = TaskNpuStateKey {
-            owner: NpuOwnerIds {
-                task_id: 11,
-                process_id: 22,
-                address_space_id: 33,
-            },
-            core_slot: 0,
+    fn build_test_npu(core_count: usize) -> Rknpu {
+        let mut mmios = (0..core_count)
+            .map(|_| vec![0_u8; 0x10000])
+            .collect::<Vec<_>>();
+        let base_addrs = mmios
+            .iter_mut()
+            .map(|mmio| NonNull::new(mmio.as_mut_ptr()).unwrap())
+            .collect::<Vec<_>>();
+        let config = RknpuConfig {
+            rknpu_type: RknpuType::Rk3588,
         };
-        let binding = ActiveCoreBinding {
-            key,
-            subcore_slot: 0,
-            batch_task_start: 0,
-            batch_task_count: 1,
-            current_task_index: 0,
-            expected_irq_mask: 0x300,
-        };
-
-        shared.prepare_active_binding(
-            binding,
-            TaskNpuState {
-                key,
-                current_task_index: 1,
-                ..TaskNpuState::default()
-            },
-        );
-        shared.prepare_active_binding(
-            binding,
-            TaskNpuState {
-                key,
-                current_task_index: 7,
-                ..TaskNpuState::default()
-            },
-        );
-
-        let states = shared.task_npu_state.lock();
-        assert_eq!(states.len(), 1);
-        assert_eq!(states.get(&key).unwrap().current_task_index, 7);
+        Rknpu::new(&base_addrs, config)
     }
 
     #[test]
-    fn owner_contexts_keep_latest_saved_context() {
-        let shared = RknpuSharedState::new();
-        let owner = NpuOwnerIds {
-            task_id: 101,
-            process_id: 202,
-            address_space_id: 303,
-        };
+    fn harvest_completed_dispatches_returns_raw_core_status() {
+        let mut npu = build_test_npu(1);
+        npu.base[0].irq_status.store(0x300, Ordering::Release);
 
-        assert!(!shared.has_owner_context(owner));
-        shared.ensure_owner_context(owner);
-        assert!(shared.has_owner_context(owner));
+        let completed = npu.harvest_completed_dispatches();
 
-        let mut context = NpuContext::default();
-        context.submit.flags = 0x55;
-        context.submit.task_number = 3;
-        shared.save_owner_context(owner, context);
-
-        let saved = shared
-            .owner_context(owner)
-            .expect("owner context should exist");
-        assert_eq!(saved.submit.flags, 0x55);
-        assert_eq!(saved.submit.task_number, 3);
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].core_slot, 0);
+        assert_eq!(completed[0].observed_irq_status, 0x300);
+        assert_eq!(npu.base[0].irq_status.load(Ordering::Acquire), 0);
     }
 
     #[test]
-    fn resident_owner_state_is_replaceable() {
-        let shared = RknpuSharedState::new();
-        let owner = NpuOwnerIds {
-            task_id: 1,
-            process_id: 2,
-            address_space_id: 3,
-        };
-        let mut submit = RknpuSubmit::default();
-        submit.task_number = 4;
+    fn harvest_completed_dispatches_collects_multiple_cores() {
+        let mut npu = build_test_npu(2);
 
-        shared.set_resident_owner(Some(ResidentOwnerState {
-            owner,
-            last_submit: submit.clone(),
-        }));
+        npu.base[0].irq_status.store(0x100, Ordering::Release);
+        npu.base[1].irq_status.store(0x300, Ordering::Release);
 
-        let resident = shared
-            .resident_owner()
-            .expect("resident owner must be present");
-        assert_eq!(resident.owner, owner);
-        assert_eq!(resident.last_submit.task_number, 4);
+        let completed = npu.harvest_completed_dispatches();
 
-        shared.set_resident_owner(None);
-        assert!(shared.resident_owner().is_none());
+        assert_eq!(completed.len(), 2);
+        assert_eq!(completed[0].core_slot, 0);
+        assert_eq!(completed[0].observed_irq_status, 0x100);
+        assert_eq!(completed[1].core_slot, 1);
+        assert_eq!(completed[1].observed_irq_status, 0x300);
+        assert_eq!(npu.base[0].irq_status.load(Ordering::Acquire), 0);
+        assert_eq!(npu.base[1].irq_status.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn action_iommu_domain_round_trip_uses_input_value() {
+        let mut npu = build_test_npu(1);
+
+        assert_eq!(npu.action(RknpuAction::GetIommuDomainId, 0).unwrap(), 0);
+        assert_eq!(npu.action(RknpuAction::SetIommuDomainId, 7).unwrap(), 0);
+        assert_eq!(npu.action(RknpuAction::GetIommuDomainId, 0).unwrap(), 7);
+    }
+
+    #[test]
+    fn action_rejects_out_of_range_iommu_domain() {
+        let mut npu = build_test_npu(1);
+
+        let err = npu.action(RknpuAction::SetIommuDomainId, 16).unwrap_err();
+
+        assert_eq!(err, RknpuError::InvalidParameter);
+    }
+
+    #[test]
+    fn action_reports_total_sram_from_variant_data() {
+        let mut npu = build_test_npu(1);
+        npu.data.nbuf_size = 0x4000;
+
+        assert_eq!(
+            npu.action(RknpuAction::GetTotalSramSize, 0).unwrap(),
+            0x4000
+        );
+        assert_eq!(npu.action(RknpuAction::GetFreeSramSize, 0).unwrap(), 0x4000);
+    }
+
+    #[test]
+    fn soft_reset_clears_published_irq_state() {
+        let mut npu = build_test_npu(2);
+        npu.base[0].irq_status.store(0x100, Ordering::Release);
+        npu.base[1].irq_status.store(0x300, Ordering::Release);
+
+        npu.soft_reset().unwrap();
+
+        assert_eq!(npu.base[0].irq_status.load(Ordering::Acquire), 0);
+        assert_eq!(npu.base[1].irq_status.load(Ordering::Acquire), 0);
     }
 }

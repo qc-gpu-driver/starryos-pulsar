@@ -1,5 +1,9 @@
 //! Special devices
 
+pub mod card0;
+pub mod card1;
+mod dma_heap;
+pub mod drm;
 #[cfg(feature = "input")]
 mod event;
 mod fb;
@@ -8,11 +12,8 @@ mod log;
 mod r#loop;
 #[cfg(feature = "memtrack")]
 mod memtrack;
-mod dma_heap;
-pub mod card0;
-pub mod card1;
+mod rknpu_scheduler;
 mod rtc;
-pub mod drm;
 pub mod tty;
 
 use alloc::{format, sync::Arc};
@@ -314,10 +315,7 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             Arc::new(card1::Card1::new()),
         ),
     );
-    root.add(
-        "dri",
-        SimpleDir::new_maker(fs.clone(), Arc::new(dri_dir)),
-    );
+    root.add("dri", SimpleDir::new_maker(fs.clone(), Arc::new(dri_dir)));
 
     // Loop devices
     for i in 0..16 {

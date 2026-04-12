@@ -34,10 +34,9 @@ use crate::{JobMode, op::Operation};
 pub mod cna;
 pub(crate) mod def;
 pub mod dpu;
-pub mod npu_context;
 pub mod op;
-
-pub use npu_context::{NpuContext, ProcessNpuState};
+pub mod taskqueen;
+pub use taskqueen::*;
 
 /// 任务批次的共享参数 — 独立于实际的 regcmd 数据。
 #[derive(Debug, Clone)]

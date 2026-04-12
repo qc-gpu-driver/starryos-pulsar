@@ -1,22 +1,23 @@
+use alloc::vec;
 use core::{
     any::Any,
     convert::TryFrom,
     ffi::{CStr, c_char, c_ulong},
-    mem::{self, size_of},
+    mem,
 };
 
 use axfs_ng_vfs::{DeviceId, NodeFlags, VfsError, VfsResult};
-use axtask::{current, yield_now};
 use memory_addr::{MemoryAddr, PhysAddrRange};
 use rknpu::{
-    NpuOwnerIds, RknpuAction,
-    ioctrl::{RknpuMemCreate, RknpuMemMap, RknpuSubmit},
+    RknpuAction, RknpuQueuedSubmit, RknpuTask,
+    ioctrl::{RknpuMemCreate, RknpuMemDestroy, RknpuMemMap, RknpuSubmit},
 };
-use starry_core::{task::AsThread, vfs::DeviceMmap};
+use starry_core::vfs::DeviceMmap;
 
 use super::{
     card0::{RknpuCmd, copy_from_user, copy_to_user},
     drm::DrmVersion,
+    rknpu_scheduler::{enqueue_submit, take_terminal_submit, wait_for_submit},
 };
 use crate::vfs::{
     DeviceOps,
@@ -214,9 +215,6 @@ impl DeviceOps for Card1 {
 
 /// Gets a reference to the NPU device
 pub fn npu() -> Result<rdrive::DeviceGuard<::rknpu::Rknpu>, VfsError> {
-    // 这里改成阻塞锁：
-    // submit 路径现在会在 task 边界主动让出，因此并发进程应该排队推进，
-    // 而不是因为瞬时竞争直接收到 `AddressInUse`。
     rdrive::get_one()
         .ok_or(VfsError::NotFound)?
         .lock()
@@ -237,6 +235,20 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
     info!("rknpu_driver_ioctl: op = {:?}", op);
     match op {
         RknpuCmd::Submit => {
+            // This ioctl still looks blocking from userspace, but internally
+            // the calling thread no longer advances the submit by repeatedly
+            // dispatching tasks itself.
+            //
+            // The new lifecycle is:
+            //   1. copy the userspace submit/task array into kernel shadow memory
+            //   2. enqueue one whole submit into the global NPU scheduler
+            //   3. put only this submitter thread to sleep
+            //   4. let the worker thread dispatch and harvest work per core
+            //   5. wake this thread once the whole submit becomes terminal
+            //
+            // While this thread sleeps, other threads continue running
+            // normally. They may enter the same ioctl path and enqueue new NPU
+            // submits, which is how multiple processes share the device now.
             let mut submit_args = RknpuSubmit::default();
             copy_from_user(
                 &mut submit_args as *mut _ as *mut u8,
@@ -245,38 +257,104 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
             )?;
             info!("rknpu submit ioctl {submit_args:#x?}");
 
-            // 用“当前线程 + 当前进程 + 当前地址空间”组成 owner key，
-            // 驱动后续据此保存/恢复这次 submit 的软件进度。
-            let curr = current();
-            let thr = curr.as_thread();
-            let owner = NpuOwnerIds {
-                task_id: curr.id().as_u64(),
-                process_id: thr.proc_data.proc.pid() as u64,
-                address_space_id: alloc::sync::Arc::as_ptr(&thr.proc_data.aspace) as usize as u64,
-            };
-
-            loop {
-                let finished = with_npu(|rknpu_dev| {
-                    rknpu_dev
-                        .submit_ioctrl_step_with_owner(&mut submit_args, owner)
-                        .map_err(|_| VfsError::InvalidData)
-                })
-                .inspect_err(|e| warn!("rknpu submit ioctl failed: {:?}", e))?;
-
-                if finished {
-                    break;
-                }
-                // 这次只推进到一个 task IRQ 边界；主动让出后，别的 owner
-                // 就有机会接管设备并继续它们各自未完成的 submit。
-                yield_now();
+            if submit_args.task_number == 0 || submit_args.task_obj_addr == 0 {
+                warn!(
+                    "rknpu invalid submit header: task_number={}, task_obj_addr={:#x}, \
+                     task_base_addr={:#x}",
+                    submit_args.task_number, submit_args.task_obj_addr, submit_args.task_base_addr,
+                );
+                warn!("rknpu submit ioctl rejected invalid submit header");
+                return Err(VfsError::InvalidData);
             }
-            debug!("rknpu submit ioctl result: {:#x?}", submit_args);
+
+            if submit_args.task_base_addr == 0 {
+                debug!(
+                    "rknpu submit header keeps legacy zero task_base_addr, scheduler will \
+                     preserve zero DMA base"
+                );
+            }
+
+            let user_task_obj_addr = submit_args.task_obj_addr;
+            let task_bytes = (submit_args.task_number as usize)
+                .checked_mul(mem::size_of::<RknpuTask>())
+                .ok_or(VfsError::InvalidData)?;
+            let mut tasks = vec![RknpuTask::default(); submit_args.task_number as usize];
+            copy_from_user(
+                tasks.as_mut_ptr() as *mut u8,
+                user_task_obj_addr as *const u8,
+                task_bytes,
+            )?;
+
+            // `enqueue_submit()` only inserts the task into the scheduler and
+            // kicks the worker if needed. It does not run the whole submission
+            // inline on behalf of this syscall thread.
+            warn!(
+                "[rknpu-submit] queueing blocking submit task_number={} core_mask={:#x} \
+                 timeout={} task_base_addr={:#x} user_task_obj_addr={:#x}",
+                submit_args.task_number,
+                submit_args.core_mask,
+                submit_args.timeout,
+                submit_args.task_base_addr,
+                user_task_obj_addr
+            );
+            let queue_task_id = enqueue_submit(RknpuQueuedSubmit::new(submit_args.clone(), tasks))
+                .inspect_err(|e| warn!("[rknpu-submit] enqueue_submit failed: {:?}", e))?;
+
+            warn!(
+                "[rknpu-submit] enqueued queue_task={} and entering blocking wait",
+                queue_task_id
+            );
+
+            // Sleep until the queue entry is terminal. This blocks only the
+            // current thread. The worker keeps driving the NPU, and other CPU
+            // threads remain free to run or enqueue more NPU work.
+            wait_for_submit(queue_task_id).inspect_err(|e| {
+                warn!(
+                    "[rknpu-submit] wait_for_submit failed for queue_task={}: {:?}",
+                    queue_task_id, e
+                )
+            })?;
+
+            warn!(
+                "[rknpu-submit] blocking wait finished for queue_task={}, collecting terminal \
+                 snapshot",
+                queue_task_id
+            );
+
+            // After wake-up the queue entry is already terminal. Copy the
+            // kernel-owned shadow task array back into the caller's task
+            // buffer, then write the final submit header back to the ioctl
+            // argument so userspace sees the completed counters/status fields.
+            let finished = take_terminal_submit(queue_task_id).inspect_err(|e| {
+                warn!(
+                    "[rknpu-submit] take_terminal_submit failed for queue_task={}: {:?}",
+                    queue_task_id, e
+                )
+            })?;
+            let mut finished_submit = finished.submit;
+            finished_submit.task_obj_addr = user_task_obj_addr;
+
+            warn!(
+                "[rknpu-submit] terminal queue_task={} task_counter={} last_error={:?}",
+                queue_task_id, finished_submit.task_counter, finished.last_error
+            );
+
+            copy_to_user(
+                user_task_obj_addr as *mut u8,
+                finished.tasks.as_ptr() as *const u8,
+                task_bytes,
+            )?;
 
             copy_to_user(
                 arg as *mut u8,
-                &submit_args as *const _ as *const u8,
+                &finished_submit as *const _ as *const u8,
                 mem::size_of::<RknpuSubmit>(),
             )?;
+
+            if let Some(err) = finished.last_error {
+                warn!("rknpu submit ioctl completed with driver error: {:?}", err);
+                return Err(VfsError::InvalidData);
+            }
         }
         RknpuCmd::MemCreate => {
             info!("rknpu mem_create ioctl");
@@ -333,37 +411,37 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
             )?;
         }
         RknpuCmd::MemDestroy => {
-            info!("rknpu mem_destroy ioctl");
+            let mut mem_destroy = RknpuMemDestroy::default();
+            copy_from_user(
+                &mut mem_destroy as *mut _ as *mut u8,
+                arg as *const u8,
+                mem::size_of::<RknpuMemDestroy>(),
+            )?;
+
+            warn!(
+                "[rknpu] mem_destroy ioctl handle={} obj_addr={:#x}",
+                mem_destroy.handle, mem_destroy.obj_addr
+            );
+
+            with_npu(|rknpu_dev| {
+                if rknpu_dev
+                    .get_phys_addr_and_size(mem_destroy.handle)
+                    .is_none()
+                {
+                    warn!(
+                        "[rknpu] mem_destroy ignored unknown handle={} obj_addr={:#x}",
+                        mem_destroy.handle, mem_destroy.obj_addr
+                    );
+                    return Ok(());
+                }
+
+                rknpu_dev.destroy(mem_destroy.handle);
+                Ok(())
+            })
+            .inspect_err(|e| warn!("rknpu mem_destroy ioctl failed: {:?}", e))?;
         }
         RknpuCmd::MemSync => {
             info!("rknpu mem_sync ioctl");
-        }
-        RknpuCmd::DumpStatus => {
-            info!("rknpu dump_status ioctl");
-            let mut submit = RknpuSubmit::default();
-
-            if arg != 0 {
-                copy_from_user(
-                    &mut submit as *mut _ as *mut u8,
-                    arg as *const u8,
-                    size_of::<RknpuSubmit>(),
-                )?;
-            }
-
-            let curr = current();
-            let thr = curr.as_thread();
-            let owner = NpuOwnerIds {
-                task_id: curr.id().as_u64(),
-                process_id: thr.proc_data.proc.pid() as u64,
-                address_space_id: alloc::sync::Arc::as_ptr(&thr.proc_data.aspace) as usize as u64,
-            };
-
-            // 这是纯调试辅助路径，不推进任务，只把当前 owner 视角下的状态格式化输出。
-            with_npu(|rknpu_dev| {
-                let state = rknpu_dev.read_process_npu_state(&submit, owner);
-                state.dump_pretty();
-                Ok(())
-            })?;
         }
         _ => {
             info!("rknpu action ioctl");
@@ -381,7 +459,7 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
 
             with_npu(|rknpu_dev| {
                 let val = rknpu_dev
-                    .action(action.flags)
+                    .action(action.flags, action.value)
                     .map_err(|_| VfsError::InvalidData)?;
                 action.value = val;
                 Ok(())
@@ -395,47 +473,6 @@ pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
             )?;
         }
     }
-    Ok(0)
-}
-
-/// Handles RKNPU submit ioctl command
-pub fn rknpu_submit_ioctl(arg: usize) -> VfsResult<usize> {
-    let mut submit_args = RknpuSubmit::default();
-
-    copy_from_user(
-        &mut submit_args as *mut _ as *mut u8,
-        arg as *const u8,
-        mem::size_of::<RknpuSubmit>(),
-    )?;
-
-    let curr = current();
-    let thr = curr.as_thread();
-    let owner = NpuOwnerIds {
-        task_id: curr.id().as_u64(),
-        process_id: thr.proc_data.proc.pid() as u64,
-        address_space_id: alloc::sync::Arc::as_ptr(&thr.proc_data.aspace) as usize as u64,
-    };
-
-    loop {
-        let finished = with_npu(|rknpu_dev| {
-            rknpu_dev
-                .submit_ioctrl_step_with_owner(&mut submit_args, owner)
-                .map_err(|_| VfsError::InvalidData)
-        })
-        .inspect_err(|e| warn!("rknpu submit ioctl failed: {:?}", e))?;
-
-        if finished {
-            break;
-        }
-        // 与上面的 ioctl 分发路径保持一致：每推进一个 task 边界就主动让出。
-        yield_now();
-    }
-
-    copy_to_user(
-        arg as *mut u8,
-        &submit_args as *const _ as *const u8,
-        mem::size_of::<RknpuSubmit>(),
-    )?;
     Ok(0)
 }
 

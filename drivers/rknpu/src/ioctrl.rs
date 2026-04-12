@@ -15,7 +15,7 @@
 //!     ◄── handle, dma_addr, obj_addr       分配 DMA 缓冲区
 //!  3. memcpy(obj_addr, input_tensor)       CPU 写入缓冲区
 //!  4. 填充任务描述符（RknpuTask[]）
-//!  5. ioctl(SUBMIT, RknpuSubmit)         → submit_ioctrl()
+//!  5. ioctl(SUBMIT, RknpuSubmit)         → submit_ioctrl_step()
 //!     ◄── task_counter, hw_elapse_time     编程 PC，等待 IRQ
 //!  6. memcpy(output, obj_addr)             CPU 读取结果
 //!  7. ioctl(MEM_DESTROY, handle)         → GemPool::destroy()
@@ -26,11 +26,8 @@
 //! RK3588 有多达 3 个 NPU 核心。单个 `RknpuSubmit` 可以通过 `subcore_task[5]`
 //! 数组针对多个核心 — 每个条目指定任务数组的哪个切片发送到哪个核心。
 //! 驱动遍历非空条目并为每个条目调用 `submit_one()`。
-use crate::Vec;
-use core::sync::atomic::Ordering;
-
-use crate::status::{ActiveCoreBinding, NpuOwnerIds, TaskNpuState, TaskNpuStateKey};
-use crate::{ResidentOwnerState, Rknpu, RknpuError, RknpuTask};
+use crate::{Rknpu, RknpuError, RknpuTask};
+use core::mem::size_of;
 
 /// 从用户空间传递的子核心任务范围。
 ///
@@ -38,7 +35,7 @@ use crate::{ResidentOwnerState, Rknpu, RknpuError, RknpuTask};
 /// 它告诉驱动："将 tasks[task_start .. task_start+task_number]
 /// 提交到此特定 NPU 核心。"
 #[repr(C)]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RknpuSubcoreTask {
     /// 此核心的任务数组中第一个任务的索引。
     pub task_start: u32,
@@ -59,6 +56,22 @@ pub struct RknpuMemMap {
     pub reserved: u32,
     /// 驱动返回的伪文件偏移量，适用于 mmap()。
     pub offset: u64,
+}
+
+/// Parameters for destroying one DMA buffer (GEM object).
+///
+/// Userspace passes back the opaque `handle` received from `MEM_CREATE`.
+/// `obj_addr` is kept for ABI compatibility with the Linux-style ioctl
+/// contract, but the driver-side lookup is keyed by `handle`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RknpuMemDestroy {
+    /// GEM object handle previously returned by `MEM_CREATE`.
+    pub handle: u32,
+    /// Reserved padding for 64-bit alignment.
+    pub reserved: u32,
+    /// CPU virtual address of the memory object (ABI compatibility only).
+    pub obj_addr: u64,
 }
 
 /// 主要的任务提交 ioctl 结构。
@@ -162,356 +175,109 @@ pub struct RknpuMemSync {
 }
 
 impl Rknpu {
-    /// 在每次进入 step-submit 前处理 owner 切换。
+    /// Dispatches one queued task to one hardware core.
     ///
-    /// 语义：
-    /// - 如果硬件当前驻留的是别的 owner，先把它最新的 submit 进度读出来并保存；
-    /// - 然后把当前 owner 标记为新的 resident owner；
-    /// - 后续 IRQ 和 wait 路径都据此判断“这一步任务究竟属于谁”。
-    fn prepare_submit_owner(&self, submit: &RknpuSubmit, owner: NpuOwnerIds) {
-        if let Some(resident) = self.shared.resident_owner() {
-            if resident.owner != owner {
-                let previous_context = self.read_npu_context(&resident.last_submit, resident.owner);
-                let previous_completed = previous_context.driver_status.batch.completed_task_count;
-                let previous_total = previous_context.submit.task_number;
-
-                if previous_total != 0 && previous_completed < previous_total {
-                    warn!(
-                        "[NPU] owner switch at task boundary: prev(task={}, process={}, aspace={:#x}, progress={}/{}) -> next(task={}, process={}, aspace={:#x})",
-                        resident.owner.task_id,
-                        resident.owner.process_id,
-                        resident.owner.address_space_id,
-                        previous_completed,
-                        previous_total,
-                        owner.task_id,
-                        owner.process_id,
-                        owner.address_space_id
-                    );
-                }
-
-                self.shared
-                    .save_owner_context(resident.owner, previous_context);
-            }
-        }
-
-        let had_saved_context = self.shared.has_owner_context(owner);
-        self.shared.ensure_owner_context(owner);
-        self.shared.set_resident_owner(Some(ResidentOwnerState {
-            owner,
-            last_submit: submit.clone(),
-        }));
-
-        debug!(
-            "[NPU] submit owner prepared: task={} process={} aspace={:#x} saved_ctx={}",
-            owner.task_id, owner.process_id, owner.address_space_id, had_saved_context
-        );
-    }
-
-    /// 在一次 step-submit 结束后，把当前 owner 的最新 submit 快照回软件上下文表。
-    fn snapshot_submit_owner_context(&self, submit: &RknpuSubmit, owner: NpuOwnerIds) {
-        let current_context = self.read_npu_context(submit, owner);
-        self.shared.save_owner_context(owner, current_context);
-        self.shared.set_resident_owner(Some(ResidentOwnerState {
-            owner,
-            last_submit: submit.clone(),
-        }));
-    }
-
-    /// # 工作流程
+    /// This is the driver-side execution primitive used by the queue
+    /// scheduler. One call does exactly one thing:
     ///
-    /// 1. **刷新缓存**（`comfirm_write_all`），以便 NPU 可以看到
-    ///    CPU 写入 GEM 缓冲区的所有张量数据。
-    /// 2. **迭代** 5 个 `subcore_task` 槽。每个非空槽触发 `submit_one()`，
-    ///    它对相应的 NPU 核心进行编程并忙等待完成。
-    /// 3. **使缓存无效**（`prepare_read_all`），以便 CPU 可以读取
-    ///    NPU 产生的输出张量。
-    /// 4. 为用户空间填充 `task_counter` 和 `hw_elapse_time`。
-    pub fn submit_ioctrl(&mut self, args: &mut RknpuSubmit) -> Result<(), RknpuError> {
-        self.submit_ioctrl_with_owner(args, NpuOwnerIds::default())
-    }
-
-    /// 兼容旧语义的完整 submit 包装器。
+    /// - bind one queued task to one physical core
+    /// - program that core with one task descriptor
+    /// - return immediately without waiting for completion
     ///
-    /// 内部反复调用 `submit_ioctrl_step_with_owner()`，直到整次 submit 的所有 task 都完成。
-    pub fn submit_ioctrl_with_owner(
+    /// The blocking behavior now lives outside this function in the OS-side
+    /// queue scheduler. That layer may sleep the submitter thread, harvest IRQ
+    /// completions, and dispatch follow-up tasks later on.
+    ///
+    /// Legacy userspace may leave `task_base_addr` as zero. The previous submit
+    /// path forwarded that zero unchanged, so the queue scheduler preserves the
+    /// same behavior instead of rejecting the submit.
+    pub fn submit_ioctrl_step(
         &mut self,
-        args: &mut RknpuSubmit,
-        owner: NpuOwnerIds,
+        core_slot: usize,
+        submit_flags: u32,
+        task_total: u32,
+        task_dma_base: u64,
+        subcore_slot: u8,
+        task_index: u32,
+        task: &mut RknpuTask,
     ) -> Result<(), RknpuError> {
-        loop {
-            if self.submit_ioctrl_step_with_owner(args, owner)? {
-                return Ok(());
-            }
-        }
-    }
-
-    /// 执行一次“可让出”的 submit 步进。
-    ///
-    /// 当前实现的抢占粒度是“单个 task 完成 IRQ 边界”：
-    /// - 每次调用最多只推进当前 submit 的一个 task-batch；
-    /// - `args.task_counter` 既是完成计数，也是重新进入时的恢复游标；
-    /// - 返回 `Ok(true)` 表示整次 submit 已全部完成。
-    pub fn submit_ioctrl_step_with_owner(
-        &mut self,
-        args: &mut RknpuSubmit,
-        owner: NpuOwnerIds,
-    ) -> Result<bool, RknpuError> {
-        // 只在整次 submit 第一次进入时做写回同步；后续 step 继续沿用同一批 DMA 数据。
-        if args.task_counter == 0 {
-            self.gem.comfirm_write_all()?;
-        }
-
-        if args.flags & 1 << 1 > 0 {
-            debug!("Nonblock task");
-        }
-
-        let task_ptr = args.task_obj_addr as *mut RknpuTask;
-        // 找出这次 submit 真正参与执行的 subcore 槽位。
-        let active_subcore_slots: Vec<usize> = args
-            .subcore_task
-            .iter()
-            .enumerate()
-            .filter(|(_, subcore)| subcore.task_number > 0)
-            .map(|(slot, _)| slot)
-            .take(self.base.len())
-            .collect();
-
-        // 空提交直接视为完成，同时把当前 owner 的软件上下文更新成“空态”。
-        if active_subcore_slots.is_empty() || args.task_number == 0 {
-            self.gem.prepare_read_all()?;
-            args.task_counter = 0;
-            args.hw_elapse_time = 0;
-            self.snapshot_submit_owner_context(args, owner);
-            return Ok(true);
-        }
-
-        self.prepare_submit_owner(args, owner);
-
-        // 先把 `(owner, core)` 状态槽位预建好，避免 IRQ 上下文第一次插入 map。
-        for core_slot in 0..active_subcore_slots.len() {
-            self.shared.ensure_task_state_entry(TaskNpuStateKey {
-                owner,
-                core_slot: core_slot as u8,
-            });
-        }
-
-        // 把 `task_counter` 解释为“这次 submit 已稳定完成了多少个 task”，
-        // 然后据此算出本次重新进入时应该从哪个全局 task 索引继续。
-        let task_iter_start = args.subcore_task[active_subcore_slots[0]].task_start as usize;
-        let task_iter_end = task_iter_start
-            + active_subcore_slots
-                .iter()
-                .map(|slot| args.subcore_task[*slot].task_number as usize)
-                .sum::<usize>();
-        let completed_task_count =
-            (args.task_counter as usize).min(task_iter_end.saturating_sub(task_iter_start));
-        let task_iter = task_iter_start + completed_task_count;
-
-        // 如果游标已经走到末尾，本次进入只需要补一次读回同步并回填完成状态。
-        if task_iter >= task_iter_end {
-            if let Err(err) = self.gem.prepare_read_all() {
-                self.snapshot_submit_owner_context(args, owner);
-                return Err(err);
-            }
-            args.task_counter = (task_iter_end - task_iter_start) as u32;
-            args.hw_elapse_time = (args.timeout / 2) as _;
-            self.snapshot_submit_owner_context(args, owner);
-            return Ok(true);
-        }
-
-        // 每次 step 最多推进一个“当前可发出的批次”：
-        // - 单核 submit 时就是 1 个 task；
-        // - 多核 submit 时是“每个活跃 core 各 1 个 task”。
-        let task_batch = active_subcore_slots
-            .len()
-            .min(task_iter_end - task_iter)
-            .min(self.base.len());
-        let submit_tasks =
-            unsafe { core::slice::from_raw_parts_mut(task_ptr.add(task_iter), task_batch) };
-        let int_mask: Vec<u32> = submit_tasks.iter().map(|task| task.int_mask).collect();
-
-        for idx in 0..task_batch {
-            // Drop any stale owner/core association before draining leftover IRQs from a
-            // previous batch, so the drain path cannot attribute them to the new submitter.
-            self.shared.clear_active_binding(idx);
-            self.base[idx].drain_pending_interrupts();
-            let expected_irq_mask = submit_tasks[idx].int_mask;
-            /*
-            let regcmd_dma = submit_tasks[idx].regcmd_addr;
-            let regcfg_offset = submit_tasks[idx].regcfg_offset;
-            let regcfg_amount = submit_tasks[idx].regcfg_amount;
-            */
-            let binding = ActiveCoreBinding {
-                key: TaskNpuStateKey {
-                    owner,
-                    core_slot: idx as u8,
-                },
-                subcore_slot: active_subcore_slots[idx] as u8,
-                batch_task_start: task_iter as u32,
-                batch_task_count: 1,
-                current_task_index: (task_iter + idx) as u32,
-                expected_irq_mask,
-            };
-            /*
-            let mut restore_image = NpuCoreRestoreImage::default();
-            // regcmd 存在 DMA/GEM 缓冲区里，这里必须先按 DMA 地址复制到 CPU 可读内存，
-            // 不能把 `regcmd_addr` 直接当成本地指针去解引用。
-            let regcmd_words = self.gem.copy_regcmd_words(
-                regcmd_dma,
-                regcfg_offset as usize,
-                regcfg_amount as usize,
+        if core_slot >= self.base.len() {
+            debug!(
+                "[NPU] submit_ioctrl_step rejected invalid core_slot={} base_len={} task_index={}",
+                core_slot,
+                self.base.len(),
+                task_index
             );
-            restore_image.task_shadow_writes = if let Some(words) = regcmd_words {
-                self.base[idx].build_task_shadow_writes_from_regcmds(&words)
-            } else {
-                warn!(
-                    "[NPU] failed to resolve regcmd DMA {:#x} (offset={:#x}, words={}) for core {} task {}",
-                    regcmd_dma,
-                    regcfg_offset,
-                    regcfg_amount,
-                    idx,
-                    task_iter + idx
-                );
-                Vec::new()
-            };
-            */
-            let task_state = TaskNpuState {
-                key: binding.key,
-                subcore_slot: binding.subcore_slot,
-                batch_task_start: binding.batch_task_start,
-                batch_task_count: binding.batch_task_count,
-                current_task_index: binding.current_task_index,
-                expected_irq_mask: binding.expected_irq_mask,
-                restore_verified: true,
-                ..TaskNpuState::default()
-            };
-            self.shared.prepare_active_binding(binding, task_state);
-
-            // 真正启动当前 step 对应的 task。
-            if let Err(err) =
-                self.base[idx].start_execute_one(idx, &self.data, &mut submit_tasks[idx], args)
-            {
-                self.shared.clear_active_bindings(task_batch);
-                self.snapshot_submit_owner_context(args, owner);
-                return Err(err);
-            }
+            return Err(RknpuError::InvalidParameter);
         }
 
-        if let Err(err) = self.wait_all_npucore(self.wait_fn, int_mask, submit_tasks) {
-            self.shared.clear_active_bindings(task_batch);
-            self.snapshot_submit_owner_context(args, owner);
+        if task_total == 0 {
+            debug!(
+                "[NPU] submit_ioctrl_step rejected empty submit core={} task_base_addr={:#x}",
+                core_slot, task_dma_base
+            );
+            return Err(RknpuError::InvalidParameter);
+        }
+
+        if task_index >= task_total {
+            debug!(
+                "[NPU] submit_ioctrl_step rejected task_index={} >= task_number={} core={}",
+                task_index, task_total, core_slot
+            );
+            return Err(RknpuError::InvalidParameter);
+        }
+
+        // `task_base_addr` belongs to the legacy DMA task-array contract. The
+        // new queue path still preserves the visible field, but it may remain
+        // zero while the real task descriptor is supplied through `task`.
+        let task_dma_addr = if task_dma_base == 0 {
+            0
+        } else {
+            task_dma_base + u64::from(task_index).saturating_mul(size_of::<RknpuTask>() as u64)
+        };
+
+        // Reset completion state before the task enters hardware. The final
+        // `int_status` will be written back later by the scheduler harvest path.
+        task.int_status = 0;
+        let regcmd_addr = task.regcmd_addr;
+        let regcfg_amount = task.regcfg_amount;
+        let int_mask = task.int_mask;
+        debug!(
+            "[NPU] submit_ioctrl_step dispatch core={} subcore={} task_index={} task_number={} flags={:#x} task_base_addr={:#x} task_dma_addr={:#x} regcmd_addr={:#x} regcfg_amount={} int_mask={:#x}",
+            core_slot,
+            subcore_slot,
+            task_index,
+            task_total,
+            submit_flags,
+            task_dma_base,
+            task_dma_addr,
+            regcmd_addr,
+            regcfg_amount,
+            int_mask
+        );
+
+        // Drain stale completion state before rebinding this core. Otherwise an
+        // old IRQ could be misattributed to the new dispatch.
+        self.base[core_slot].drain_pending_interrupts();
+
+        if let Err(err) = self.base[core_slot].start_execute_one(
+            core_slot,
+            &self.data,
+            task,
+            submit_flags,
+            task_dma_addr,
+        ) {
+            debug!(
+                "[NPU] submit_ioctrl_step start_execute_one failed core={} task_index={}: {:?}",
+                core_slot, task_index, err
+            );
             return Err(err);
         }
 
-        // 这一步稳定完成后，更新 submit 级游标；下次重新进入时就从这里继续。
-        args.task_counter = (task_iter + task_batch - task_iter_start) as u32;
-        let finished = args.task_counter as usize >= (task_iter_end - task_iter_start);
-        if finished {
-            if let Err(err) = self.gem.prepare_read_all() {
-                self.snapshot_submit_owner_context(args, owner);
-                return Err(err);
-            }
-            args.task_counter = (task_iter_end - task_iter_start) as u32;
-            args.hw_elapse_time = (args.timeout / 2) as _;
-        }
-        self.snapshot_submit_owner_context(args, owner);
-
-        Ok(finished)
-    }
-
-    /// 等待所有 NPU 核心完成当前任务。
-    pub fn wait_all_npucore(
-        &self,
-        normal_wait_fn: Option<fn()>,
-        int_mask: Vec<u32>,
-        submit_tasks: &mut [RknpuTask],
-    ) -> Result<(), RknpuError> {
-        let wait_start_idx: usize = 0; //从0开始等待
-        let max_core: usize = submit_tasks.len();
-        let mut done: [bool; 3] = [false; 3]; //跟踪每个核心是否完成
-        if let Some(wait) = normal_wait_fn {
-            debug!("[NPU]   waiting (IRQ+WFI mode)...");
-            // ┌─────────────────────────────────────────────────────┐
-            // │  IRQ-driven mode (CPU sleeps between checks)        │
-            // │                                                     │
-            // │  NPU runs → fires IRQ → handler calls               │
-            // │  handle_interrupt() → stores fuzzed status to       │
-            // │  irq_status atomic → CPU wakes from WFI → we       │
-            // │  read the atomic here and proceed.                  │
-            // └─────────────────────────────────────────────────────┘
-            loop {
-                let status: Vec<u32> = self
-                    .base
-                    .iter()
-                    .map(|core| core.irq_status.load(Ordering::Acquire))
-                    .collect();
-                let mut int_status: [u32; 3] = [0; 3];
-                for idx in wait_start_idx..max_core {
-                    if status[idx] & int_mask[idx] > 0 {
-                        int_status[idx] = int_mask[idx] & status[idx]; //一次最多会有一个核心完成，cpu会处理
-                        self.base[idx].clean_interrupts();
-                        // Reset atomic for the next batch.
-                        self.base[idx].irq_status.store(0, Ordering::Release);
-                        warn!("[NPU]   batch done: int_status={:#x}", int_status[idx]);
-                        submit_tasks[idx].int_status = int_status[idx]; //给对应核心的单任务设置完成状态，用户空间会检查这个状态并继续处理结果
-                        if let Some(binding) = self.shared.active_binding(idx) {
-                            let mut states = self.shared.task_npu_state.lock();
-                            if let Some(state) = states.get_mut(&binding.key) {
-                                state.observed_irq_status = status[idx];
-                                state.last_task_int_status = int_status[idx];
-                                /*
-                                // IRQ handler 在发布 `irq_status` 之前，已经完成了
-                                // “快照 -> 写坏 -> 恢复 -> 读回校验” 这一整套实验路径。
-                                // 这里若发现校验失败，直接让整个 submit 失败，避免继续推进脏状态。
-                                if !state.restore_verified {
-                                    error!(
-                                        "[NPU] submit aborted: restore verify failed on core {} owner(task={}, process={}, aspace={:#x}) mismatch_mask={:#x}",
-                                        idx,
-                                        binding.key.owner.task_id,
-                                        binding.key.owner.process_id,
-                                        binding.key.owner.address_space_id,
-                                        state.restore_mismatch_mask
-                                    );
-                                    self.shared.clear_active_bindings(max_core);
-                                    return Err(RknpuError::TaskError);
-                                }
-                                */
-                            }
-                        }
-                        self.shared.clear_active_binding(idx);
-                        done[idx] = true; //标记这个核心完成了
-                    }
-                    continue; //继续检查是哪个核心触发中断
-                }
-
-                if done[..max_core].iter().filter(|status| !**status).count() == 0 {
-                    break;
-                }
-
-                for idx in 0..max_core {
-                    if done[idx] {
-                        continue;
-                    }
-                    if status[idx] != 0 && (status[idx] & int_mask[idx] == 0) {
-                        // 有中断但不是我们期望的 → 硬件错误
-                        self.shared.clear_active_bindings(max_core);
-                        return Err(RknpuError::TaskError);
-                    }
-                }
-
-                // Sleep until any interrupt (including NPU) wakes the CPU.
-                (wait)();
-            }
-        } else {
-            debug!("[NPU]   waiting (busy-wait mode)...");
-            // ┌─────────────────────────────────────────────────────┐
-            // │  Busy-wait mode (CPU continuously polls)            │
-            // │                                                     │
-            // │  NPU runs → CPU continuously reads interrupt status  │
-            // │  registers until it sees the expected bits set.     │
-            // └─────────────────────────────────────────────────────┘
-            panic!("[NPU] busy-poll mode not implemented for multi-core wait");
-        };
+        debug!(
+            "[NPU] submit_ioctrl_step programmed hardware core={} subcore={} task_index={}",
+            core_slot, subcore_slot, task_index
+        );
 
         Ok(())
     }
@@ -520,9 +286,7 @@ impl Rknpu {
 #[cfg(test)]
 mod tests {
     use super::RknpuSubmit;
-    use crate::{
-        NpuOwnerIds, Rknpu, RknpuConfig, RknpuTask, RknpuType, TaskNpuStateKey, status::NpuCtxState,
-    };
+    use crate::{Rknpu, RknpuConfig, RknpuError, RknpuTask, RknpuType};
     use alloc::vec::Vec;
     use core::ptr::NonNull;
 
@@ -544,6 +308,7 @@ mod tests {
     fn fake_submit(tasks: &mut [RknpuTask], task_number: u32) -> RknpuSubmit {
         let mut submit = RknpuSubmit::default();
         submit.task_obj_addr = tasks.as_mut_ptr() as u64;
+        submit.task_base_addr = 0x2000;
         submit.task_number = task_number;
         submit.core_mask = 0x1;
         submit.subcore_task[0].task_start = 0;
@@ -552,81 +317,100 @@ mod tests {
     }
 
     #[test]
-    fn prepare_submit_owner_saves_previous_owner_context_on_switch() {
-        let (npu, _mmios) = build_fake_rknpu();
-        let owner_a = NpuOwnerIds {
-            task_id: 11,
-            process_id: 22,
-            address_space_id: 33,
-        };
-        let owner_b = NpuOwnerIds {
-            task_id: 44,
-            process_id: 55,
-            address_space_id: 66,
-        };
+    fn submit_step_rejects_invalid_core_slot() {
+        let (mut npu, _mmios) = build_fake_rknpu();
         let mut tasks = [RknpuTask::default()];
-        let mut submit_a = fake_submit(&mut tasks, 1);
-        submit_a.flags = 0x1;
-        let mut submit_b = fake_submit(&mut tasks, 1);
-        submit_b.flags = 0x2;
+        let submit = fake_submit(&mut tasks, 1);
 
-        npu.prepare_submit_owner(&submit_a, owner_a);
-        assert_eq!(
-            npu.shared
-                .resident_owner()
-                .expect("resident owner should be tracked")
-                .owner,
-            owner_a
-        );
+        let err = npu
+            .submit_ioctrl_step(
+                3,
+                submit.flags,
+                submit.task_number,
+                submit.task_base_addr,
+                0,
+                0,
+                &mut tasks[0],
+            )
+            .unwrap_err();
 
-        npu.prepare_submit_owner(&submit_b, owner_b);
-
-        let saved_a = npu
-            .shared
-            .owner_context(owner_a)
-            .expect("previous owner context should be saved");
-        let resident = npu
-            .shared
-            .resident_owner()
-            .expect("new resident owner should be tracked");
-
-        assert_eq!(saved_a.submit.flags, 0x1);
-        assert_eq!(saved_a.submit.task_number, 1);
-        assert!(matches!(
-            saved_a.driver_status.ctx_state,
-            NpuCtxState::Prepared
-        ));
-        assert_eq!(resident.owner, owner_b);
-        assert_eq!(resident.last_submit.flags, 0x2);
+        assert_eq!(err, RknpuError::InvalidParameter);
     }
 
     #[test]
-    fn prepare_submit_owner_does_not_overwrite_same_owner_context() {
-        let (npu, _mmios) = build_fake_rknpu();
-        let owner = NpuOwnerIds {
-            task_id: 77,
-            process_id: 88,
-            address_space_id: 99,
-        };
-        let mut tasks = [RknpuTask::default()];
-        let submit_a = fake_submit(&mut tasks, 1);
-        let submit_b = fake_submit(&mut tasks, 1);
+    fn submit_step_dispatches_one_task() {
+        let (mut npu, _mmios) = build_fake_rknpu();
+        let mut tasks = [RknpuTask {
+            int_mask: 0x300,
+            ..RknpuTask::default()
+        }];
+        let submit = fake_submit(&mut tasks, 1);
 
-        npu.shared.ensure_task_state_entry(TaskNpuStateKey {
-            owner,
-            core_slot: 0,
-        });
-        let mut saved = crate::NpuContext::default();
-        saved.submit.flags = 0x99;
-        npu.shared.save_owner_context(owner, saved);
+        npu.submit_ioctrl_step(
+            0,
+            submit.flags,
+            submit.task_number,
+            submit.task_base_addr,
+            0,
+            0,
+            &mut tasks[0],
+        )
+        .unwrap();
 
-        npu.prepare_submit_owner(&submit_a, owner);
-        npu.prepare_submit_owner(&submit_b, owner);
+        assert_eq!(tasks[0].int_status, 0);
+        assert_eq!(
+            npu.base[0]
+                .irq_status
+                .load(core::sync::atomic::Ordering::Acquire),
+            0
+        );
+    }
 
-        let saved = npu
-            .shared
-            .owner_context(owner)
-            .expect("same owner context should remain");
-        assert_eq!(saved.submit.flags, 0x99);
+    #[test]
+    fn submit_step_rejects_out_of_range_task_index() {
+        let (mut npu, _mmios) = build_fake_rknpu();
+        let mut tasks = [RknpuTask {
+            int_mask: 0x300,
+            ..RknpuTask::default()
+        }];
+        let submit = fake_submit(&mut tasks, 1);
+        let err = npu
+            .submit_ioctrl_step(
+                0,
+                submit.flags,
+                submit.task_number,
+                submit.task_base_addr,
+                0,
+                1,
+                &mut tasks[0],
+            )
+            .unwrap_err();
+
+        assert_eq!(err, RknpuError::InvalidParameter);
+    }
+
+    #[test]
+    fn submit_step_accepts_legacy_zero_task_base_addr() {
+        let (mut npu, mmios) = build_fake_rknpu();
+        let mut tasks = [RknpuTask {
+            int_mask: 0x300,
+            ..RknpuTask::default()
+        }];
+        let mut submit = fake_submit(&mut tasks, 1);
+        submit.task_base_addr = 0;
+
+        npu.submit_ioctrl_step(
+            0,
+            submit.flags,
+            submit.task_number,
+            submit.task_base_addr,
+            0,
+            0,
+            &mut tasks[0],
+        )
+        .unwrap();
+
+        let task_dma_reg = u32::from_le_bytes(mmios[0][0x34..0x38].try_into().unwrap());
+        assert_eq!(task_dma_reg, 0);
     }
 }
