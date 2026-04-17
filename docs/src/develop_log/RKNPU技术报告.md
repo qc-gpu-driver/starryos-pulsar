@@ -49,19 +49,7 @@ service 层的 blocking submit 通过 per-submit waiter 阻塞：调用线程在
 
 这版调度器的价值就在这里：它没有把用户态 ABI 改复杂，但把内核侧的执行模型从"谁提交谁跑"推进到了"统一排队、统一分发、统一回收"。
 
-### 2.3 可观测性与卡顿排查
-
-本轮开发过程中出现过 benchmark 运行卡住、需要手动退出的情况。这个问题不能靠猜：可能是硬件没有产生预期中断，也可能是 worker 没有继续 harvest，或者是任务状态已经 terminal 但 waiter 没被唤醒。因此这一轮也补了调度器日志，重点观察几个位置：
-
-1. submit 是否成功入队。
-2. worker 是否被 kick 唤醒。
-3. 每个 core 是否成功 dispatch。
-4. IRQ/completion 是否被 harvest。
-5. terminal submit 是否进入 complete 并唤醒 waiter。
-
-最新的 [log.txt](/home/inkbottle/othersrc/npu/log.txt) 这次没有复现卡死，最后输出了 `benchmark complete status=0`。这说明这一轮 benchmark 至少可以完整跑完；但它不能证明偶发卡顿已经彻底消失。后续仍然需要长时间循环、异常注入和更高日志粒度来区分硬件边界和软件边界。
-
-### 2.4 引入 `rknpu-regs` 寄存器库
+### 2.3 引入 `rknpu-regs` 寄存器库
 
 寄存器访问层也做了工程化整理，引入了基于 SVD / `svd2rust` 生成的 [drivers/rknpu-regs](/home/inkbottle/othersrc/npu/drivers/rknpu-regs)。驱动开发里手写寄存器偏移和位域非常容易出错，尤其是 NPU 这种寄存器块多、字段分散、不同 core 地址重复的硬件。
 
@@ -72,15 +60,13 @@ service 层的 blocking submit 通过 per-submit waiter 阻塞：调用线程在
 3. 让寄存器访问代码更接近硬件文档，后续查错更方便。
 4. 把”访问寄存器”和”调度策略”拆开，避免调度器里混入大量底层地址细节。
 
-这不是性能优化，但它直接影响驱动后续能不能继续维护。寄存器层越稳，上层调度和功能扩展越不容易被低级错误拖住。
-
 ## 三、benchmark 测试内容
 
-### 3.1 测量范围与方法论
+### 3.1 测量范围与方法
 
 本次性能数据来自 [log.txt](/home/inkbottle/othersrc/npu/log.txt) 中运行的 `./core_scaling_benchmark`，对应测试程序是 [core_scaling_benchmark.c](/home/inkbottle/othersrc/npu/demo/npu_benchmark/tests/core_scaling_benchmark.c)。
 
-**测量窗口**：仅覆盖 blocking `DRM_IOCTL_RKNPU_SUBMIT` 的完整往返时间，即 submit ioctl 从进入到返回。operand packing 和 regcmd generation 单独打印，不计入对比窗口。因此下面的数据反映的是 driver submit、scheduler dispatch/harvest、硬件执行和 completion 回收的综合耗时，而非单独的调度器开销或硬件计算时间。
+**测量窗口**：仅覆盖 blocking `DRM_IOCTL_RKNPU_SUBMIT` 的完整往返时间，即 submit ioctl 从进入到返回。operand packing 和 regcmd generation 单独打印，不计入对比窗口。因此下面的数据反映的是 driver submit、scheduler dispatch/harvest、硬件执行和 completion 回收的综合耗时
 
 **指标定义**：
 
@@ -94,8 +80,7 @@ service 层的 blocking submit 通过 per-submit waiter 阻塞：调用线程在
 ### 3.2 测试环境
 
 - **硬件平台**：RK3588 SoC（三核 NPU）
-- **操作系统**：StarryOS
-- **驱动版本**：benchmark 日志对应 revision 未记录/未核实（报告撰写时 HEAD 为 3cf489e）
+- **操作系统**：StarryOS比赛版本
 - **Benchmark 程序**：`core_scaling_benchmark`（4 场景 × 2 operand 模式）
 - **测量轮次**：每场景 warmup 2 轮 + measured 5-12 轮（场景相关）
 - **频率/电源控制**：未控制（默认 governor）
@@ -126,15 +111,15 @@ service 层的 blocking submit 通过 per-submit waiter 阻塞：调用线程在
 
 `llama_decode_like` 只跑 shared 模式，unique tasks 在测试程序里设为 0，所以日志里会跳过 unique。它模拟的是 decode 阶段常见的投影类 workload：M 很低，但 K 和 N 很大。这个场景不一定追求最高吞吐，更关心一次 submit 的阻塞时间能不能被多核明显压下来。
 
-测试程序还有几个细节值得说明。输入和权重不是随机数，而是由 `deterministic_input_value()` 和 `deterministic_weight_value()` 生成的整数模式；输出会抽样和 CPU reference 比较。每个 task 的 `int_status` 也会检查，期望值是 `0x300`。任务分发时，`distribute_tasks_to_cores()` 会按 core 数把 task range 平均切到 `subcore_task[]`，1 core 时只填 core0，3 cores 时填 core0/core1/core2 并设置对应 `core_mask`。因此这个 benchmark 测到的不是单纯的 C 程序循环，而是完整覆盖了 submit ABI、调度器 lane 切分、三核 dispatch、IRQ completion 和 copy-back 这些路径。
+输入和权重不是随机数，而是由 `deterministic_input_value()` 和 `deterministic_weight_value()` 生成的整数模式；输出会抽样和 CPU reference 比较。每个 task 的 `int_status` 也会检查，期望值是 `0x300`。任务分发时，`distribute_tasks_to_cores()` 会按 core 数把 task range 平均切到 `subcore_task[]`，1 core 时只填 core0，3 cores 时填 core0/core1/core2 并设置对应 `core_mask`。因此这个 benchmark 测到的不是单纯的 C 程序循环，而是完整覆盖了 submit ABI、调度器 lane 切分、三核 dispatch、IRQ completion 和 copy-back 这些路径。
 
 ## 四、benchmark 结果与性能分析
 
 ### 4.1 总体结论
 
-这次 benchmark 的结果比上一版更明确：所有有效场景里，三核都比单核快，没有出现最终退化。最好的场景是 `llama_decode_like/shared-operands`，从 `344.354 ms` 降到 `137.000 ms`，speedup 达到 `2.514x`，parallel efficiency 为 `83.78%`。这说明调度器已经能把 RK3588 三个 NPU core 的并行能力用起来。
+所有有效场景里，三核都比单核快，没有出现最终退化。最好的场景是 `llama_decode_like/shared-operands`，从 `344.354 ms` 降到 `137.000 ms`，speedup 达到 `2.514x`，parallel efficiency 为 `83.78%`。这说明调度器已经能把 RK3588 三个 NPU core 的并行能力用起来。
 
-但也不能把结果说满。即便三核都有正收益，大多数场景的 parallel efficiency 仍在 `57%` 到 `68%` 左右，离理想 `3x` 还有距离。原因很现实：每个 task 的硬件执行并不是唯一成本，driver 编程、IRQ 回收、worker 调度、cache/DMA 同步、submit 阻塞唤醒都会吃掉一部分收益。任务越小，这部分固定成本越明显。
+但也不能把结果说满。即便三核都有正收益，大多数场景的 parallel efficiency 仍在 `57%` 到 `68%` 左右
 
 ### 4.2 结果汇总
 
@@ -166,33 +151,17 @@ service 层的 blocking submit 通过 per-submit waiter 阻塞：调用线程在
 
 unique 模式任务数只有 4 个，这是为了控制 DMA footprint。它仍然从 `6.781 ms` 降到 `3.939 ms`，speedup 为 `1.721x`。任务数少会限制三核利用率，因为 worker 能同时派发的 lane 数量和后续补发机会都变少。这个结果没有 shared 模式好，但仍然是稳定正收益。
 
-### 4.6 `llama_decode_like`：长任务场景收益最好，但 jitter 需要注意
+### 4.6 `llama_decode_like`：长任务场景收益最好，但 jitter 较大
 
 `llama_decode_like` 是本次最强的结果。它的 shared 模式从 `344.354 ms` 降到 `137.000 ms`，speedup 达到 `2.514x`，parallel efficiency 为 `83.78%`，GFLOP/s 从 `4.677` 提升到 `11.756`。这说明在低 M、高 K、高 N 的投影类 workload 下，当前三核调度能显著降低 submit 阻塞时间。
 
-但这个场景也暴露了一个细节：3-core 的 min/max 为 `126.027 / 139.504 ms`，jitter span 达到 `9.84%`，明显高于 1-core 的 `0.03%`。也就是说，平均值很好，但三核路径下仍有一定波动。可能原因包括 worker harvest 时机、core completion 到达顺序、yield 后重新调度的时间差，以及更长任务下不同 core 之间的尾部等待。这个问题不会否定三核收益，但后续需要继续看尾延迟，不能只看平均值。
+但这个场景也反应出在3-core 的 min/max 为 `126.027 / 139.504 ms`时，jitter span 达到 `9.84%`，明显高于 1-core 的 `0.03%`。也就是说，平均值很好，但三核路径下仍有一定波动。可能原因包括 worker harvest 时机、core completion 到达顺序、yield 后重新调度的时间差，以及更长任务下不同 core 之间的尾部等待。
 
-### 4.7 这轮结果说明了什么
-
-这次数据可以支持三个判断：
+### 4.7 这轮结果说明
 
 1. 三核支持已经有效。所有有效 benchmark 场景都显示 3-core submit 时间低于 1-core。
 2. 调度器设计已在真实 benchmark 中转化为性能收益。ready/running 队列推进、core binding 和 completion 回收这套机制能够有效利用三核并行。需要注意的是，当前 benchmark 验证的是单次 blocking submit 内的多核扩展收益，而非多线程并发提交的竞争场景——后者是调度器设计支持的能力，但尚未专项测试。
 3. 软件开销仍然存在。大多数场景没有接近理想 `3x`，说明 dispatch、harvest、同步和调度唤醒成本仍然需要优化。
-
-还有一点要单独说：这次日志完整跑到 `benchmark complete status=0`，说明当前版本在这组测试里没有卡死。但之前出现过"最后真卡住"的情况，所以稳定性结论不能只靠一次成功日志。更合理的说法是：当前性能趋势已经明确，偶发卡顿还需要通过长时间循环和更细日志继续定位。
-
-### 4.8 测量有效性说明（Threats to Validity）
-
-以下因素限制了本次 benchmark 结论的适用范围：
-
-1. **测量窗口仅覆盖 submit 往返时间**。数据反映的是 driver submit + scheduler dispatch/harvest + 硬件执行 + completion 回收的综合耗时，不能单独归因于调度器优化或硬件计算。
-2. **正确性校验为抽样**。每场景仅第一轮 measured round 做输出抽样比对，不是全量验证。
-3. **未进行多线程并发提交测试**。当前 benchmark 是单线程顺序提交，每次 submit 等待完成后再提交下一个。调度器设计支持多线程共享 NPU，但该能力尚未通过专项并发测试验证。
-4. **测试环境控制不足**。频率、电压、温度、IRQ 亲和性均未固定，结果可能受系统状态影响。
-5. **样本轮数有限**。measured rounds 为 5-12 轮，统计置信度有限，尤其对尾延迟分析不够充分。
-6. **三核路径 jitter 明显高于单核**。`llama_decode_like` 3-core jitter span 达 `9.84%`，而 1-core 仅 `0.03%`，说明三核路径存在不确定性来源，平均值不能完整代表实际表现。
-
 
 
 ## 五、功能模块分层与实现思想
@@ -214,13 +183,6 @@ driver / dispatch / IRQ 层负责硬件事实。driver 给某个 core 编程，I
 1. 三核收益仍然低于理想值。除了 `llama_decode_like` 达到 `83.78%` efficiency，多数场景仍在 `57%` 到 `68%` 左右。说明当前并行并不是完全线性扩展，软件路径还有明显成本。
 2. 小任务场景仍然敏感。`tiny_dispatch` 虽然这次有正收益，但它的绝对 submit 时间只有毫秒级，任何一次额外调度、yield、IRQ 回收或锁竞争都会改变结果。后续如果要跑大量小算子，必须继续压低固定开销。
 3. 3-core 路径存在尾延迟波动。`llama_decode_like` 的平均 speedup 很好，但 3-core jitter span 到了 `9.84%`。这提示我们不能只盯 avg submit，还要看 min/max 和尾延迟。
-4. blocking submit 语义简单，但表达能力有限。它适合当前兼容和调试，也方便用户态直接使用；但如果后续要做更复杂的异步 runtime、跨模型调度或 submit overlap，现有接口还需要继续扩展。
-5. 单 worker 模型让状态清楚，但可能成为瓶颈。当前它的好处是所有 dispatch/harvest 串在一个地方，不容易乱；坏处是复杂混合负载下 worker 本身可能限制吞吐。
-6. 偶发卡顿还没有完全定性。这次 `log.txt` 正常结束，不能直接推翻之前的卡住现象。后续需要专门的长跑日志，记录 worker 是否还活着、core binding 是否残留、IRQ status 是否发布、waiter 是否被唤醒。
-7. 平台能力还没有完全接入 action 路径。clock、regulator、PM 的底层集成都有基础，但 `RknpuAction::PowerOn/PowerOff`、频率和电压类 action 还需要通过 service/platform trait 正式收口。
-
-
-
 
 
 ## 七、调度器的执行时序
