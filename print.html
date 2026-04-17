@@ -426,78 +426,13 @@
 </ul>
 <h3 id="73-图一submit-生命周期"><a class="header" href="#73-图一submit-生命周期">7.3 图一：Submit 生命周期</a></h3>
 <p>下图展示单个 submit 从 ioctl 入队到 copy-back 返回的完整路径，以及多个并发 submit 线程如何通过独立 waiter 共享同一个 worker。</p>
-<pre><code class="language-mermaid">sequenceDiagram
-    participant T1 as ioctl_thread_1
-    participant T2 as ioctl_thread_2
-    participant S as NpuScheduler
-    participant W as Worker
-    participant D as RknpuDev
-    participant I as IRQ
-
-    T1-&gt;&gt;S: enqueue_submit(submit_A)
-    S-&gt;&gt;S: enqueue_task() → ready[priority]
-    S-&gt;&gt;S: waiters[A] = Arc&lt;Waiter_A&gt;
-    S-&gt;&gt;W: kick.notify_one()
-    T1-&gt;&gt;T1: waiter_A.wait() [blocked]
-
-    T2-&gt;&gt;S: enqueue_submit(submit_B)
-    S-&gt;&gt;S: enqueue_task() → ready[priority]
-    S-&gt;&gt;S: waiters[B] = Arc&lt;Waiter_B&gt;
-    S-&gt;&gt;W: kick.notify_one()
-    T2-&gt;&gt;T2: waiter_B.wait() [blocked]
-
-    W-&gt;&gt;W: wait_for_work()\nlistener.wait() → awakened by kick
-    W-&gt;&gt;S: dispatch_idle_cores()
-    S-&gt;&gt;S: promote_ready_and_prepare_dispatch → running (submit_A, lane0→core0)
-    S-&gt;&gt;D: comfirm_write_all(submit_A)
-    S-&gt;&gt;D: submit_ioctrl_step(core0, lane0, task_idx)
-    S-&gt;&gt;S: core_binding[0] = {A, lane0, idx}
-
-    S-&gt;&gt;S: promote_ready_and_prepare_dispatch → running (submit_B, lane0→core1)
-    S-&gt;&gt;D: comfirm_write_all(submit_B)
-    S-&gt;&gt;D: submit_ioctrl_step(core1, lane0, task_idx)
-    S-&gt;&gt;S: core_binding[1] = {B, lane0, idx}
-
-    I-&gt;&gt;D: handle_npu_irq_core0()
-    W-&gt;&gt;D: harvest_completed_dispatches()
-    W-&gt;&gt;S: core_binding.remove(core0) → {A, lane0, idx}
-    W-&gt;&gt;S: complete_lane(A, lane0) / cursor++
-    W-&gt;&gt;S: reclassify_task(A) → complete[]
-    W-&gt;&gt;D: prepare_read_all()
-    W-&gt;&gt;T1: waiter_A.complete() [unblocks T1]
-
-    T1-&gt;&gt;S: take_terminal_submit(A)
-    T1-&gt;&gt;T1: copy-back → return to user
-</code></pre>
+<p><img src="develop_log/images/sumit_life_cycle.svg" alt="Logo" title="Company Logo" /></p>
 <h3 id="74-图二worker-主循环与多核派发"><a class="header" href="#74-图二worker-主循环与多核派发">7.4 图二：Worker 主循环与多核派发</a></h3>
 <p>下图展示 worker 线程的主循环结构，以及 harvest 和 dispatch 如何交替推进多个 submit 的执行。</p>
-<pre><code class="language-mermaid">flowchart TD
-    A([Worker 启动]) --&gt; B[wait_for_work\n等待 kick 信号]
-    B --&gt; C{has_work?}
-    C -- 否 --&gt; B
-    C -- 是 --&gt; D[harvest_completed_cores\n轮询已完成的 core]
-    D --&gt; E[对每个完成的 core:\ncore_binding.remove\ncomplete_lane / cursor++\nreclassify_task]
-    E --&gt; F{有 terminal submit?}
-    F -- 是 --&gt; G[prepare_read_all\nwaiter.complete\n唤醒等待线程]
-    F -- 否 --&gt; H[dispatch_idle_cores\n为空闲 core 选任务]
-    G --&gt; H
-    H --&gt; I{有 running submit\n可继续派发?}
-    I -- 是 --&gt; J[prepare_dispatch_from_running\nrunning-before-ready 策略]
-    I -- 否 --&gt; K{有 ready submit?}
-    K -- 是 --&gt; L[promote_ready_and_prepare_dispatch\n提升到 running]
-    K -- 否 --&gt; M{还有 inflight?}
-    J --&gt; N[comfirm_write_all\nsubmit_ioctrl_step\ncore_binding 记录]
-    L --&gt; N
-    N --&gt; O{本轮有 harvest\n或 dispatch?}
-    O -- 是 --&gt; D
-    O -- 否 --&gt; M
-    M -- 是 --&gt; P[yield_now\n让出 CPU]
-    P --&gt; D
-    M -- 否 --&gt; B
-</code></pre>
+<p><img src="develop_log/images/worker_main.svg" alt="Logo" title="Company Logo" /></p>
 <h2 id="八总结与后续工作"><a class="header" href="#八总结与后续工作">八、总结与后续工作</a></h2>
-<p>本轮二次开发把 RKNPU 驱动从"单核能跑"推进到了"三核能跑、能调度、能测出收益"的阶段。3-core 支持已经在 benchmark 中体现出实际价值，任务调度器也证明了 blocking submit 之下可以做统一队列管理。现在最重要的问题不再是"方向对不对"，而是继续把这条路径压稳、压快。</p>
-<p>后续工作建议集中在四个方向：</p>
+<p>本轮二次开发把 RKNPU 驱动从"单核能跑"推进到了"三核能跑、能调度、能测出收益"的阶段。3-core 支持已经在 benchmark 中体现出实际价值，任务调度器也证明了 blocking submit 之下可以做统一队列管理</p>
+<p>后续工作将集中在四个方向：</p>
 <ol>
 <li>继续压缩 dispatch、harvest、同步和 worker 唤醒成本，尤其关注小任务和短 submit。</li>
 <li>增加长时间循环 benchmark 和卡顿复现测试，重点记录 worker、core binding、IRQ status 和 waiter 状态。</li>
