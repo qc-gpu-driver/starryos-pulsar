@@ -24,7 +24,10 @@
       "Read(//home/inkbottle/.claude/plugins/cache/PolyArch/humanize/1.15.4/scripts/lib/**)",
       "Skill(humanize:start-rlcr-loop)",
       "Skill(humanize:start-rlcr-loop:*)",
-      "Bash(\"/home/inkbottle/.claude/plugins/cache/PolyArch/humanize/1.15.4/scripts/setup-rlcr-loop.sh\" .humanize/plan.md)"
+      "Bash(\"/home/inkbottle/.claude/plugins/cache/PolyArch/humanize/1.15.4/scripts/setup-rlcr-loop.sh\" .humanize/plan.md)",
+      "Bash(/home/inkbottle/.claude/plugins/cache/PolyArch/humanize/1.15.4/scripts/ask-codex.sh ' *)",
+      "Bash(\"/home/inkbottle/.claude/plugins/cache/PolyArch/humanize/1.15.4/scripts/codex-review.sh\" --base main)",
+      "Read(//home/inkbottle/.claude/plugins/cache/PolyArch/humanize/1.15.4/scripts/**)"
     ],
     "additionalDirectories": [
       "/home/inkbottle/.claude/plugins/cache/PolyArch/humanize/1.15.4/prompt-template/plan"
