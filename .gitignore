@@ -9,5 +9,5 @@ npu-state-machine-context.md
 .gitnexus
 AGENTS.md
 CLAUDE.md
-.claude/settings.json
+.claude/
 .humanize/
