@@ -370,7 +370,7 @@ fn mem_and_action_ioctls_roundtrip() {
     assert_eq!(mem_map.offset, (mem_create.handle as u64) << 12);
 
     let mut action = super::RknpuUserAction {
-        flags: RknpuAction::GetDrvVersion,
+        flags: RknpuAction::GetDrvVersion as u32,
         value: 0,
     };
     assert_eq!(
@@ -403,4 +403,23 @@ fn mem_and_action_ioctls_roundtrip() {
         .with_device(|dev| Ok(dev.get_phys_addr_and_size(mem_create.handle).is_some()))
         .unwrap();
     assert!(!exists_after_destroy);
+}
+
+#[test]
+fn action_ioctl_rejects_unknown_opcode() {
+    let platform = MockPlatform::new();
+    let service = RknpuService::new(platform);
+
+    let mut action = super::RknpuUserAction {
+        flags: u32::MAX,
+        value: 0,
+    };
+
+    assert_eq!(
+        service.driver_ioctl(
+            RknpuCmd::Action,
+            (&mut action as *mut super::RknpuUserAction) as usize,
+        ),
+        Err(RknpuServiceError::BadIoctl)
+    );
 }

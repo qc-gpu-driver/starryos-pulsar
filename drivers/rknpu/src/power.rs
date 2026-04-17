@@ -11,7 +11,7 @@ use rockchip_pm::RockchipPM;
 /// The historical implementation used `wfi` directly here. The current version
 /// yields to the scheduler instead so the system can continue making progress
 /// while the submit path waits for interrupt completion.
-fn irq_yield() {
+pub(crate) fn irq_yield() {
     //unsafe { core::arch::asm!("wfi") };
     //axklib::time::busy_wait(core::time::Duration::from_micros(10));
     axtask::yield_now();
@@ -43,7 +43,6 @@ pub fn enable_pm() {
     pm.power_domain_on(NPU1).unwrap();
     pm.power_domain_on(NPU2).unwrap();
 }
-
 
 
 

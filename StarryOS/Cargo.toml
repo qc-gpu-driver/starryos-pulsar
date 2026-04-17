@@ -79,7 +79,7 @@ starry-api = { path = "./api" }
 
 rdrive = "0.18"
 
-rknpu = { git = "https://github.com/drivercraft/rknpu" }
+rknpu = { git = "https://github.com/drivercraft/rknpu", features = ["starryos"] }
 
 [package]
 name = "starry"

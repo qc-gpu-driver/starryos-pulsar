@@ -27,5 +27,5 @@ axklib = {git = "https://github.com/arceos-hypervisor/arceos", branch = "hypervi
 rockchip-pm = {git = "https://github.com/drivercraft/rockchip-pm.git"}
 rk3588-clk = {git = "https://github.com/drivercraft/rk3588-clk"}
 sdmmc = { git = "https://github.com/YanQD/sdmmc.git" }
-rknpu = { git = "https://github.com/drivercraft/rknpu" }
+rknpu = { git = "https://github.com/drivercraft/rknpu", features = ["starryos"] }
 some-serial = "0.2"

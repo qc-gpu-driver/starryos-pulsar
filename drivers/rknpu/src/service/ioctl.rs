@@ -47,8 +47,8 @@ impl TryFrom<u32> for RknpuCmd {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RknpuUserAction {
-    /// Requested action opcode.
-    pub flags: RknpuAction,
+    /// Requested raw action opcode copied from userspace.
+    pub flags: u32,
     /// Input/output value associated with the action.
     pub value: u32,
 }
@@ -57,7 +57,7 @@ impl Default for RknpuUserAction {
     /// Default to a harmless driver-version query with an empty value field.
     fn default() -> Self {
         Self {
-            flags: RknpuAction::GetDrvVersion,
+            flags: RknpuAction::GetDrvVersion as u32,
             value: 0,
         }
     }
@@ -232,8 +232,10 @@ impl<P: RknpuPlatform> RknpuService<P> {
     /// Execute a small driver action query/update and copy the result value back.
     fn handle_action_ioctl(&self, arg: usize) -> Result<usize, RknpuServiceError> {
         let mut action = self.copy_from_user::<RknpuUserAction>(arg)?;
+        let action_code =
+            RknpuAction::try_from(action.flags).map_err(|_| RknpuServiceError::BadIoctl)?;
         self.with_npu_driver(|rknpu_dev| {
-            let val = rknpu_dev.action(action.flags, action.value)?;
+            let val = rknpu_dev.action(action_code, action.value)?;
             action.value = val;
             Ok(())
         })?;

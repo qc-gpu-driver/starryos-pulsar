@@ -10,6 +10,8 @@ use crate::tool::iomap;
 use crate::enable_pm;
 use crate::irq::NPU_IRQ_HANDLERS;
 use crate::irq::NPU_IRQ_FNS;
+#[cfg(target_arch = "aarch64")]
+use crate::power::irq_yield;
 
 /// Convert an ARM GIC FDT interrupt tuple `[type, number, flags]` into a GIC
 /// IRQ number.

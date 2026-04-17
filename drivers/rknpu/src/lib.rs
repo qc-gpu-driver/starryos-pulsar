@@ -20,10 +20,14 @@ mod gem;
 mod job;
 mod osal;
 mod registers;
-pub mod power;
 pub mod service;
+#[cfg(feature = "starryos")]
+pub mod power;
+#[cfg(feature = "starryos")]
 mod irq;
+#[cfg(feature = "starryos")]
 mod tool;
+#[cfg(feature = "starryos")]
 mod npuprobe;
 pub mod status;
 mod task;
@@ -38,6 +42,7 @@ pub use status::*;
 pub use task::*;
 pub mod ioctrl;
 use crate::data::RknpuData;
+#[cfg(feature = "starryos")]
 pub use crate::power::*;
 use crate::registers::RknpuCore;
 
@@ -82,6 +87,42 @@ pub enum RknpuAction {
     GetFreeSramSize = 23,
     GetIommuDomainId = 24,
     SetIommuDomainId = 25,
+}
+
+impl core::convert::TryFrom<u32> for RknpuAction {
+    type Error = ();
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::GetHwVersion),
+            1 => Ok(Self::GetDrvVersion),
+            2 => Ok(Self::GetFreq),
+            3 => Ok(Self::SetFreq),
+            4 => Ok(Self::GetVolt),
+            5 => Ok(Self::SetVolt),
+            6 => Ok(Self::ActReset),
+            7 => Ok(Self::GetBwPriority),
+            8 => Ok(Self::SetBwPriority),
+            9 => Ok(Self::GetBwExpect),
+            10 => Ok(Self::SetBwExpect),
+            11 => Ok(Self::GetBwTw),
+            12 => Ok(Self::SetBwTw),
+            13 => Ok(Self::ActClrTotalRwAmount),
+            14 => Ok(Self::GetDtWrAmount),
+            15 => Ok(Self::GetDtRdAmount),
+            16 => Ok(Self::GetWtRdAmount),
+            17 => Ok(Self::GetTotalRwAmount),
+            18 => Ok(Self::GetIommuEn),
+            19 => Ok(Self::SetProcNice),
+            20 => Ok(Self::PowerOn),
+            21 => Ok(Self::PowerOff),
+            22 => Ok(Self::GetTotalSramSize),
+            23 => Ok(Self::GetFreeSramSize),
+            24 => Ok(Self::GetIommuDomainId),
+            25 => Ok(Self::SetIommuDomainId),
+            _ => Err(()),
+        }
+    }
 }
 
 /// Top-level driver handle for one RKNPU device.
@@ -458,12 +499,12 @@ impl Rknpu {
         let mut completed = Vec::new();
 
         for core_slot in 0..self.base.len().min(NPU_MAX_CORES) {
-            let irq_status = self.base[core_slot].irq_status.load(Ordering::Acquire);
+            let irq_status = self.base[core_slot]
+                .irq_status
+                .swap(0, Ordering::AcqRel);
             if irq_status == 0 {
                 continue;
             }
-
-            self.base[core_slot].irq_status.store(0, Ordering::Release);
             debug!(
                 "[NPU] harvest_completed_dispatches core{} irq_status={:#x} observed={:#x}",
                 core_slot, irq_status, irq_status

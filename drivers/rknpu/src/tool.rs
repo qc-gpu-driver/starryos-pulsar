@@ -14,5 +14,5 @@ use alloc::format;
 pub fn iomap(base: u64, size: usize) -> Result<NonNull<u8>, OnProbeError> {
     axklib::mem::iomap((base as usize).into(), size)
         .map(|ptr| unsafe { NonNull::new_unchecked(ptr.as_mut_ptr()) })
-        .map_err(|e| OnProbeError::Other(format!("{e}:?").into()))
+        .map_err(|e| OnProbeError::Other(format!("{e:?}").into()))
 }
