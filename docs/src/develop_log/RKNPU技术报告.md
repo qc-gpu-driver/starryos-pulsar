@@ -1,7 +1,5 @@
 # RKNPU技术报告
 
-本项目基于 StarryOS，面向 RK3588 平台上的 RKNPU 驱动研发。当前驱动已经具备寄存器访问、DMA/GEM 内存管理、任务描述符组织、ioctl 服务、任务提交、中断回收和多核调度链路。本轮二次开发的重点不是重新写一个驱动框架，而是在已有单核可运行基础上，把三核 NPU 真正用起来，并通过调度器让多个 submit 能按队列共享 NPU。最新 benchmark 显示，中大型任务场景下三核并行已经带来稳定正收益；但小任务和高同步开销场景仍然暴露出软件调度开销偏高的问题。
-
 ## 一、项目内容与用途
 
 这个项目的对象是 RK3588 NPU 驱动及其在 StarryOS 上的系统集成。它的作用：让上层推理程序、benchmark 或后续 runtime 能稳定地把任务提交给 NPU 执行，而不是只能依赖 Linux 或闭源用户态库环境。
@@ -14,8 +12,6 @@
 4. ioctl 服务：支持 `Submit`、`MemCreate`、`MemMap`、`MemDestroy`、`MemSync`、`Action` 等 RKNPU 专用入口。
 5. 中断与 completion 回收：IRQ handler 负责读取硬件完成状态，调度器再根据 core 绑定关系把 completion 还原到具体任务。
 6. 多核调度：在一个 submit 中按 lane 把任务切到不同 core，同时支持多个 submit 进入队列等待。
-
-这项工作的意义主要有两点。第一，它补齐了国产 SoC NPU 在自研 OS 下的驱动基础能力。第二，它给后续推理优化、runtime 接入、benchmark 对比和长时间稳定性测试提供了一个可控的实验平台。
 
 ## 二、本轮二次开发重点
 
@@ -35,7 +31,7 @@ RK3588 的 RKNPU 不是单个执行核心，而是三个可以并行工作的 NP
 
 ### 2.2 任务调度器与多线程共享 NPU
 
-第二个重点是任务调度器。NPU 是共享硬件资源，不能让多个线程各自直接碰寄存器，否则很容易出现 core 状态、任务进度和 completion 归属混乱。当前实现保留外部的 blocking submit 语义，但内部引入了调度队列和 worker 线程：
+第二个是任务调度器。NPU 是共享硬件资源，不能让多个线程各自直接碰寄存器，否则很容易出现 core 状态、任务进度和 completion 归属混乱。当前实现保留外部的 blocking submit 语义，但内部引入了调度队列和 worker 线程：
 
 1. 调用线程进入 `Submit` ioctl 后，不直接独占 NPU 跑完整批任务，而是把 submit 放进 scheduler。
 2. 每个 submit 有自己的 waiter。调用线程只等待“自己的 submit 是否完成”。
@@ -119,7 +115,7 @@ service 层的 blocking submit 通过 per-submit waiter 阻塞：调用线程在
 
 所有有效场景里，三核都比单核快，没有出现最终退化。最好的场景是 `llama_decode_like/shared-operands`，从 `344.354 ms` 降到 `137.000 ms`，speedup 达到 `2.514x`，parallel efficiency 为 `83.78%`。这说明调度器已经能把 RK3588 三个 NPU core 的并行能力用起来。
 
-但也不能把结果说满。即便三核都有正收益，大多数场景的 parallel efficiency 仍在 `57%` 到 `68%` 左右
+三核都有正收益,但大多数场景的 parallel efficiency 仍在 `57%` 到 `68%` 左右
 
 ### 4.2 结果汇总
 
