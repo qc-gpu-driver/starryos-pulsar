@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>rknn硬件手册 - StarryOS-pulsar-development</title>
+        <title>第七周 - StarryOS-pulsar-development</title>
 
 
         <!-- Custom HTML head -->
@@ -12,33 +12,33 @@
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <meta name="theme-color" content="#ffffff">
 
-        <link rel="icon" href="../favicon-de23e50b.svg">
-        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
-        <link rel="stylesheet" href="../css/variables-8adf115d.css">
-        <link rel="stylesheet" href="../css/general-2459343d.css">
-        <link rel="stylesheet" href="../css/chrome-ae938929.css">
-        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+        <link rel="icon" href="../../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../../css/general-2459343d.css">
+        <link rel="stylesheet" href="../../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../../css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
-        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+        <link rel="stylesheet" href="../../fonts/fonts-9644e21d.css">
 
         <!-- Highlight.js Stylesheets -->
-        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
-        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
-        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../../ayu-highlight-3fdfc3ac.css">
 
         <!-- Custom theme stylesheets -->
 
 
         <!-- Provide site root and default themes to javascript -->
         <script>
-            const path_to_root = "../";
+            const path_to_root = "../../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-d5f4aac9.js";
+            window.path_to_searchindex_js = "../../searchindex-d5f4aac9.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="../toc-10640dec.js"></script>
+        <script src="../../toc-10640dec.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -105,7 +105,7 @@
             <!-- populated by js -->
             <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
             <noscript>
-                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+                <iframe class="sidebar-iframe-outer" src="../../toc.html"></iframe>
             </noscript>
             <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -140,7 +140,7 @@
                     <h1 class="menu-title">StarryOS-pulsar-development</h1>
 
                     <div class="right-buttons">
-                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                        <a href="../../print.html" title="Print this book" aria-label="Print this book">
                             <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
                         </a>
 
@@ -174,53 +174,106 @@
 
                 <div id="mdbook-content" class="content">
                     <main>
-                        <h1 id="rknn-硬件手册"><a class="header" href="#rknn-硬件手册">RKNN 硬件手册</a></h1>
-<blockquote>
-<p>来源：RK3588 TRM Chapter 36 RKNN</p>
-</blockquote>
-<p>本章汇总 RK3588 NPU 硬件相关文档，包括硬件特性概览与完整寄存器参考。</p>
-<h2 id="rknn-硬件特性"><a class="header" href="#rknn-硬件特性">RKNN 硬件特性</a></h2>
+                        <h1 id="第七周开发日志38-314"><a class="header" href="#第七周开发日志38-314">第七周开发日志（3.8-3.14）</a></h1>
 <ul>
-<li>三核 NPU，支持三核协同 / 双核协同 / 单核独立</li>
-<li>每核 384KB 内部缓冲，AHB 配置接口 + AXI 数据接口</li>
-<li>支持 INT4 / INT8 / INT16 / FP16 / BF16 / TF32 多精度推理</li>
-<li>功能流水线：CNA（卷积）→ CORE（MAC）→ DPU（后处理）→ PPU（池化）</li>
-<li>激活函数：ReLU / Leaky ReLU / ReLUx / Sigmoid / Tanh / Softmax</li>
-<li>池化：Average / Max / Min Pooling</li>
+<li>
+<p>工作进展：本周主要做的是规划，无实习任务相关的实质性代码工作</p>
+</li>
+<li>
+<p>本周做出了对下周工作的详细规划以及个人对aarch64的详细学习</p>
+</li>
 </ul>
-<p><a href="./rknn-feature.html">完整硬件特性</a></p>
-<h2 id="寄存器图"><a class="header" href="#寄存器图">寄存器图</a></h2>
-<p>每个核心拥有独立 64KB 寄存器空间，按功能模块划分：</p>
-<div class="table-wrapper">
-<table>
-<thead>
-<tr><th style="text-align: center">模块</th><th style="text-align: center">地址范围</th><th style="text-align: left">功能</th></tr>
-</thead>
-<tbody>
-<tr><td style="text-align: center"><strong>PC</strong></td><td style="text-align: center"><code>0x0000 ~ 0x0FFF</code></td><td style="text-align: left">任务控制器 / 命令流引擎</td></tr>
-<tr><td style="text-align: center"><strong>CNA</strong></td><td style="text-align: center"><code>0x1000 ~ 0x1FFF</code></td><td style="text-align: left">卷积神经网络加速单元</td></tr>
-<tr><td style="text-align: center"><strong>CORE</strong></td><td style="text-align: center"><code>0x3000 ~ 0x3FFF</code></td><td style="text-align: left">MAC 核心控制</td></tr>
-<tr><td style="text-align: center"><strong>DPU</strong></td><td style="text-align: center"><code>0x4000 ~ 0x4FFF</code></td><td style="text-align: left">数据后处理单元</td></tr>
-<tr><td style="text-align: center"><strong>DPU_RDMA</strong></td><td style="text-align: center"><code>0x5000 ~ 0x5FFF</code></td><td style="text-align: left">DPU 读 DMA</td></tr>
-<tr><td style="text-align: center"><strong>PPU</strong></td><td style="text-align: center"><code>0x6000 ~ 0x6FFF</code></td><td style="text-align: left">池化处理单元</td></tr>
-<tr><td style="text-align: center"><strong>PPU_RDMA</strong></td><td style="text-align: center"><code>0x7000 ~ 0x7FFF</code></td><td style="text-align: left">PPU 读 DMA</td></tr>
-<tr><td style="text-align: center"><strong>DDMA</strong></td><td style="text-align: center"><code>0x8000 ~ 0x8FFF</code></td><td style="text-align: left">Data DMA 引擎</td></tr>
-<tr><td style="text-align: center"><strong>SDMA</strong></td><td style="text-align: center"><code>0x9000 ~ 0x9FFF</code></td><td style="text-align: left">System DMA 引擎</td></tr>
-<tr><td style="text-align: center"><strong>GLOBAL</strong></td><td style="text-align: center"><code>0xF000 ~ 0xFFFF</code></td><td style="text-align: left">全局使能掩码</td></tr>
-</tbody>
-</table>
-</div>
-<p><a href="./register-map.html">寄存器总览</a></p>
+<p>-规划如下:</p>
+<h1 id="npu-协处理器化架构设计-npu-as-fpu"><a class="header" href="#npu-协处理器化架构设计-npu-as-fpu">NPU 协处理器化架构设计 (NPU as FPU)</a></h1>
+<h2 id="1-概述"><a class="header" href="#1-概述">1. 概述</a></h2>
+<p>本项目提出并实现一种创新的异构计算架构，旨在将 NPU 从传统的、基于 VFS/ioctl 的“设备”模型，提升为与 CPU 核心紧耦合的“协处理器”。其设计目标是通过极致的软硬件协同，实现 NPU 算力调度</p>
+<h2 id="2-核心设计哲学"><a class="header" href="#2-核心设计哲学">2. 核心设计哲学</a></h2>
+<p>彻底废弃传统基于 VFS（虚拟文件系统）和 <code>ioctl</code> 的松耦合设备驱动模型。将 NPU 提升为与 CPU 平级的计算协处理器（类比 FPU 浮点运算单元）。通过共享 DMA 内存、定制化系统调用（Syscall）与“懒汉式”上下文切换（Lazy Context Switch）实现算力调度。</p>
+<h2 id="3-内核数据结构扩展-tcb-升级"><a class="header" href="#3-内核数据结构扩展-tcb-升级">3. 内核数据结构扩展 (TCB 升级)</a></h2>
+<p>为了让操作系统的调度器（Scheduler）能够接管 NPU 资源，必须扩展内核的任务控制块（TCB / <code>task_struct</code>）：</p>
+<ul>
+<li>
+<p><code>npu_isdirty: bool</code></p>
+<ul>
+<li><strong>含义</strong>：NPU 硬件上下文“脏”标识位。</li>
+<li><code>true</code>：表示当前物理 NPU 硬件的内部 SRAM 和寄存器中，依然保留着该任务的数据和状态。</li>
+<li><code>false</code>：表示该任务的 NPU 状态已被换出，或者尚未使用过 NPU。</li>
+</ul>
+</li>
+<li>
+<p><code>npu_context: struct</code></p>
+<ul>
+<li><strong>含义</strong>：NPU 硬件上下文结构体。追加在原生 CPU 任务上下文之后。</li>
+<li><strong>作用</strong>：用于存储 NPU 被强行打断或切换时的完整硬件状态机。需查阅具体 NPU 芯片的闭源驱动源码及手册，提取并保存完整的寄存器集合（如命令队列指针、当前算子偏移量、中断屏蔽字等）。</li>
+</ul>
+</li>
+</ul>
+<h2 id="4-用户态基础框架-libnpu"><a class="header" href="#4-用户态基础框架-libnpu">4. 用户态基础框架 (<code>libnpu</code>)</a></h2>
+<p>在用户层封装底层细节，向应用程序开发者提供极简的 C/C++ 接口。</p>
+<ul>
+<li>
+<p><strong>专属内存分配</strong> (<code>dma_malloc</code> 系统调用)</p>
+<ul>
+<li>抛弃标准 <code>malloc</code>。用户通过 <code>dma_malloc</code> 直接向内核申请一段<strong>物理地址连续</strong>的 DMA 内存。</li>
+<li><strong>目的</strong>：绕过 IOMMU 的复杂页表配置，让 NPU 硬件的 DMA 控制器可以直接通过物理地址（PA）高速拉取数据。</li>
+</ul>
+</li>
+<li>
+<p><strong>强制中断注入</strong></p>
+<ul>
+<li>用户将计算参数、模型权重写入申请好的 DMA 内存区域。</li>
+<li>在构建 NPU 任务描述符（Task Descriptor）链表时，<code>libnpu</code> 会在底层介入，将每个<strong>微小可配置算子</strong>任务结构体中的中断控制位（IRQ Enable）<strong>强制设为开启</strong>。这是后续内核能够精准捕获算子边界、实现状态保存的关键。</li>
+</ul>
+</li>
+<li>
+<p><strong>内联汇编触发</strong> (<code>npu_work</code> API)</p>
+<ul>
+<li>利用 AArch64 调用约定，将装载了任务描述符链表的 DMA 内存<strong>物理地址指针</strong>塞入约定的寄存器（如 X0）。</li>
+<li>执行定制的内联汇编（包含特定的 <code>SVC</code> 陷入指令），直接触发定制的 <code>resolve_npu</code> 系统调用。</li>
+</ul>
+</li>
+</ul>
+<h2 id="5-内核态调度核心-resolve_npu-系统调用"><a class="header" href="#5-内核态调度核心-resolve_npu-系统调用">5. 内核态调度核心 (<code>resolve_npu</code> 系统调用)</a></h2>
+<p>这是整个架构的调度心脏。当 CPU 通过 <code>SVC</code> 陷入内核态后，严格按照以下流水线执行：</p>
+<p><strong>阶段 1：内存转换与前置检查</strong></p>
+<ol>
+<li><strong>地址翻译</strong>：将 X0 寄存器传入的用户态虚拟地址（VA），通过查询页表或 DMA 分配记录，转换为 NPU 硬件所需的物理地址（PA）。</li>
+<li><strong>硬件状态机检查</strong>：检查全局 NPU 硬件状态（<code>IDLE</code> 或 <code>BUSY</code>）。</li>
+</ol>
+<p><strong>阶段 2：懒汉式上下文切换 (Lazy Context Switch)</strong>
+调度器需要仲裁当前物理 NPU 硬件的归属权。</p>
+<ol>
+<li><strong>碰撞检测</strong>：检查系统中是否存在一个“前任任务”，其 <code>npu_isdirty == true</code>，且该任务并非当前请求任务。</li>
+<li><strong>等待安全边界</strong>：如果存在这样的“前任任务”（说明 NPU 硬件中存有他人数据），内核<strong>绝不能</strong>强行复位硬件。必须检查 NPU 当前是否为 <code>IDLE</code>。如果是 <code>BUSY</code>，当前 CPU 线程必须挂起睡眠（加入等待队列），直到 NPU 算完当前<strong>算子</strong>并触发硬件中断。</li>
+<li><strong>保存前任状态</strong>：当 NPU 确认处于 <code>IDLE</code> 后，内核立刻将 NPU 硬件内的全量寄存器状态抽取出来，保存到那个“前任任务”的 <code>npu_context</code> 中。</li>
+<li><strong>剥夺前任所有权</strong>：将“前任任务”的 <code>npu_isdirty</code> 标志位修改为 <code>false</code>。</li>
+</ol>
+<p><strong>阶段 3：恢复当前状态并启动硬件</strong></p>
+<ol>
+<li><strong>检查当前记录</strong>：检查当前请求任务的 TCB 中，是否存有尚未跑完的 <code>npu_context</code>（即之前被切换出去的状态）。</li>
+<li><strong>状态恢复</strong>：如果存在，则将 <code>npu_context</code> 里的数据原封不动地写回 NPU 的物理控制寄存器。</li>
+<li><strong>宣誓主权</strong>：将当前任务的 <code>npu_isdirty</code> 标志位置为 <code>true</code>。</li>
+<li><strong>硬件启动 (Kick the Doorbell)</strong>：将阶段1中转换好的任务描述符物理地址指针，写入 NPU 的“任务执行寄存器”，并写入特定的启动命令（“踢门铃”）。</li>
+<li><strong>状态标记与返回</strong>：将全局 NPU 状态标记为 <code>BUSY</code>，CPU 退出系统调用，返回用户态继续执行或调度其他普通线程。</li>
+</ol>
+<h2 id="6-硬件中断处理程序-npu-irq-handler"><a class="header" href="#6-硬件中断处理程序-npu-irq-handler">6. 硬件中断处理程序 (NPU IRQ Handler)</a></h2>
+<p>由于 <code>libnpu</code> 强制开启了每个<strong>算子</strong>的中断，NPU 每算完一个微小算子就会发出硬件 IRQ。</p>
+<ol>
+<li><strong>进入 ISR</strong>：CPU 陷入内核中断服务例程。</li>
+<li><strong>确认完成</strong>：读取 NPU 硬件状态寄存器，确认当前算子计算完成。</li>
+<li><strong>释放路权</strong>：将全局 NPU 状态强制标记为 <code>IDLE</code>（空闲）。</li>
+<li><strong>唤醒等待者</strong>：<strong>唤醒</strong>在 <code>resolve_npu</code> 系统调用中，因为 NPU <code>BUSY</code> 而挂起睡眠的其他任务线程，让它们得以重新参与 NPU 的抢占与上下文切换流程。</li>
+</ol>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../documents/rknn-manual.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../../develop_log/第六周/log.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="../documents/rknn-feature.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../../develop_log/第八周/log.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -230,11 +283,11 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../documents/rknn-manual.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../../develop_log/第六周/log.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="../documents/rknn-feature.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../../develop_log/第八周/log.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
@@ -254,17 +307,17 @@
         </script>
 
 
-        <script src="../elasticlunr-ef4e11c1.min.js"></script>
-        <script src="../mark-09e88c2c.min.js"></script>
-        <script src="../searcher-c2a407aa.js"></script>
+        <script src="../../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../../mark-09e88c2c.min.js"></script>
+        <script src="../../searcher-c2a407aa.js"></script>
 
-        <script src="../clipboard-1626706a.min.js"></script>
-        <script src="../highlight-abc7f01d.js"></script>
-        <script src="../book-a0b12cfe.js"></script>
+        <script src="../../clipboard-1626706a.min.js"></script>
+        <script src="../../highlight-abc7f01d.js"></script>
+        <script src="../../book-a0b12cfe.js"></script>
 
         <!-- Custom JS scripts -->
-        <script src="../mermaid-eefea253.min.js"></script>
-        <script src="../mermaid-init-ccf746f1.js"></script>
+        <script src="../../mermaid-eefea253.min.js"></script>
+        <script src="../../mermaid-init-ccf746f1.js"></script>
 
 
 
