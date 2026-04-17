@@ -95,7 +95,7 @@ service 层的 blocking submit 通过 per-submit waiter 阻塞：调用线程在
 
 - **硬件平台**：RK3588 SoC（三核 NPU）
 - **操作系统**：StarryOS
-- **驱动版本**：commit 997b3a2（本报告对应版本）
+- **驱动版本**：benchmark 日志对应 revision 未记录/未核实（报告撰写时 HEAD 为 3cf489e）
 - **Benchmark 程序**：`core_scaling_benchmark`（4 场景 × 2 operand 模式）
 - **测量轮次**：每场景 warmup 2 轮 + measured 5-12 轮（场景相关）
 - **频率/电源控制**：未控制（默认 governor）
@@ -277,6 +277,7 @@ sequenceDiagram
     S->>W: kick.notify_one()
     T2->>T2: waiter_B.wait() [blocked]
 
+    W->>W: wait_for_work()\nlistener.wait() → awakened by kick
     W->>S: dispatch_idle_cores()
     S->>S: promote_ready_and_prepare_dispatch → running (submit_A, lane0→core0)
     S->>D: comfirm_write_all(submit_A)
