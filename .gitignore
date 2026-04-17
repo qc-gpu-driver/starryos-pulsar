@@ -10,4 +10,5 @@ npu-state-machine-context.md
 AGENTS.md
 CLAUDE.md
 .claude/
+!.claude/skills/
 .humanize/
