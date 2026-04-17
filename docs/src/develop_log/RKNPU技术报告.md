@@ -43,7 +43,7 @@ RK3588 的 RKNPU 不是单个执行核心，而是三个可以并行工作的 NP
 4. scheduler 维护 ready、running、complete 这些状态。ready 表示还没开始跑的 submit，running 表示已有 lane 在跑或还有 lane 可继续派发，complete 表示终态结果等待 ioctl 路径取回。
 5. 如果 running submit 还有可派发 lane，会优先继续推进 running，而不是马上切到一个全新的 ready submit。这样可以减少同一 submit 内部的等待空洞。
 
-这里的重要配合点：底层等待函数 `wait_fn` 可以配置成 yield 型等待。这样 blocking submit 在等待硬件或等待调度推进时不会一直忙等占住 CPU，而是把执行权让给系统调度器。多个用户线程同时提交 NPU 任务时，线程可以各自阻塞在自己的 waiter 上，NPU 由全局 worker 串行管理硬件状态并并行利用多个 core。换句话说，NPU 对外看起来仍是阻塞式设备，对内已经具备“多线程共享、队列化提交、三核流式执行”的基础形态。
+service 层的 blocking submit 通过 per-submit waiter 阻塞：调用线程在 `wait_for_submit()` 上等待，直到 worker 将该 submit 移入 complete 并调用 `waiter.complete()` 唤醒它，再通过 `take_terminal_submit()` 取回终态结果。多个用户线程同时提交 NPU 任务时，线程可以各自阻塞在自己的 waiter 上，NPU 由全局 worker 串行管理硬件状态并并行利用多个 core。换句话说，NPU 对外看起来仍是阻塞式设备，对内已经具备”多线程共享、队列化提交、三核流式执行”的基础形态。
 
 
 
