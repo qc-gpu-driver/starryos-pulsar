@@ -1,60 +1,29 @@
-//! RKNPU 驱动的 I/O 控制（ioctl）接口。
-//!
-//! # 概述
-//!
-//! 本模块定义了用户空间（rknn 运行时库）通过 ioctl 系统调用传递给内核驱动的
-//! **数据结构**，以及对 NPU 硬件进行编程的驱动端**提交逻辑**。
-//!
-//! # 典型的 ioctl 流程（从用户空间角度）
-//!
-//! ```text
-//!  rknn 运行时                          驱动（此代码）
-//!  ────────────                         ──────────────────
-//!  1. open("/dev/rknpu")
-//!  2. ioctl(MEM_CREATE, RknpuMemCreate)  → GemPool::create()
-//!     ◄── handle, dma_addr, obj_addr       分配 DMA 缓冲区
-//!  3. memcpy(obj_addr, input_tensor)       CPU 写入缓冲区
-//!  4. 填充任务描述符（RknpuTask[]）
-//!  5. ioctl(SUBMIT, RknpuSubmit)         → submit_ioctrl_step()
-//!     ◄── task_counter, hw_elapse_time     编程 PC，等待 IRQ
-//!  6. memcpy(output, obj_addr)             CPU 读取结果
-//!  7. ioctl(MEM_DESTROY, handle)         → GemPool::destroy()
-//! ```
-//!
-//! # 多核提交
-//!
-//! RK3588 有多达 3 个 NPU 核心。单个 `RknpuSubmit` 可以通过 `subcore_task[5]`
-//! 数组针对多个核心 — 每个条目指定任务数组的哪个切片发送到哪个核心。
-//! 驱动遍历非空条目并为每个条目调用 `submit_one()`。
+
 use crate::{Rknpu, RknpuError, RknpuTask};
 use core::mem::size_of;
 
-/// 从用户空间传递的子核心任务范围。
+/// Per-core task range passed in from userspace.
 ///
-/// `RknpuSubmit::subcore_task[5]` 中的每个条目都是其中之一。
-/// 它告诉驱动："将 tasks[task_start .. task_start+task_number]
-/// 提交到此特定 NPU 核心。"
+/// Each entry in `RknpuSubmit::subcore_task[5]` tells the driver which slice of
+/// `tasks[]` should be dispatched to a given logical core slot.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RknpuSubcoreTask {
-    /// 此核心的任务数组中第一个任务的索引。
+    /// Index of the first task assigned to this core slot.
     pub task_start: u32,
-    /// 此核心应执行的连续任务数。
+    /// Number of contiguous tasks assigned to this core slot.
     pub task_number: u32,
 }
 
-/// 通过 mmap 将 GEM 缓冲区映射到用户空间的参数。
-///
-/// 用户空间使用 GEM 句柄调用 ioctl(MEM_MAP)，并获得可以传递给
-/// `mmap()` 以映射缓冲区的 `offset`。
+/// Parameters used to map a GEM buffer into userspace via `mmap`.
 #[repr(C)]
 #[derive(Debug, Clone, Default)]
 pub struct RknpuMemMap {
-    /// GEM 对象句柄（从 MEM_CREATE 获得）。
+    /// GEM object handle returned by `MEM_CREATE`.
     pub handle: u32,
-    /// 用于 64 位对齐的填充。
+    /// Reserved padding for 64-bit alignment.
     pub reserved: u32,
-    /// 驱动返回的伪文件偏移量，适用于 mmap()。
+    /// Driver-provided pseudo file offset suitable for `mmap()`.
     pub offset: u64,
 }
 
@@ -74,103 +43,91 @@ pub struct RknpuMemDestroy {
     pub obj_addr: u64,
 }
 
-/// 主要的任务提交 ioctl 结构。
+/// Main task-submission ioctl structure.
 ///
-/// 用户空间用任务元数据填充此结构并将其传递给 ioctl(SUBMIT)。
-/// 驱动使用它来：
-/// 1. 在内存中定位任务描述符数组（`task_obj_addr`）
-/// 2. 在每个目标核心上编程 PC 模块
-/// 3. 等待完成并填充 `task_counter` / `hw_elapse_time`
+/// Userspace fills this structure with task metadata and passes it to
+/// `ioctl(SUBMIT)`. The driver uses it to locate the task descriptor array,
+/// program the PC block on the target cores, and report terminal status back to
+/// userspace.
 ///
-/// # 字段摘要
+/// Summary:
 ///
 /// ```text
-///  flags            ──  JobMode 位（PC、NONBLOCK、PINGPONG 等）
-///  task_obj_addr    ──  RknpuTask[] 数组的 CPU 地址
-///  task_base_addr   ──  RknpuTask[] 的 DMA 地址（NPU 看到的）
-///  subcore_task[5]  ──  每个核心的任务范围
-///  core_mask        ──  要使用哪些核心（位掩码）
+///  flags            -- JobMode bits (PC, NONBLOCK, PINGPONG, ...)
+///  task_obj_addr    -- CPU address of the `RknpuTask[]` array
+///  task_base_addr   -- DMA address of the same array
+///  subcore_task[5]  -- task ranges per core slot
+///  core_mask        -- core selection bitmask
 /// ```
 #[repr(C)]
 #[derive(Debug, Clone, Default)]
 pub struct RknpuSubmit {
-    /// 作业模式标志 — 参见 [`JobMode`]（PC、BLOCK、NONBLOCK、PINGPONG 等）。
+    /// Job-mode flags.
     pub flags: u32,
-    /// 返回超时前等待完成的最长时间（毫秒）。
+    /// Maximum wait time before timing out, in milliseconds.
     pub timeout: u32,
-    /// （传统）全局任务起始索引 — 已被 subcore_task[] 取代。
+    /// Legacy global task-start index, superseded by `subcore_task[]`.
     pub task_start: u32,
-    /// 所有核心的任务总数。
+    /// Total number of tasks across all cores.
     pub task_number: u32,
-    /// 由驱动填充：实际执行了多少任务。
+    /// Filled by the driver with the number of completed tasks.
     pub task_counter: u32,
-    /// 调度优先级提示（越低 = 优先级越高）。
+    /// Scheduling priority hint. Lower values mean higher priority.
     pub priority: i32,
-    /// `RknpuTask[]` 数组的 CPU 虚拟地址。
-    /// 驱动从此地址读取任务描述符。
+    /// CPU virtual address of the `RknpuTask[]` array.
     pub task_obj_addr: u64,
-    /// 用于地址转换的 IOMMU 域 ID。
+    /// IOMMU domain identifier used for address translation.
     pub iommu_domain_id: u32,
-    /// 为 64 位对齐保留。
+    /// Reserved field kept for ABI compatibility.
     pub reserved: u32,
-    /// `RknpuTask[]` 数组的 DMA（总线）地址。
-    /// 这是编程到 PC 的 TASK_DMA_BASE_ADDR 寄存器中的内容。
+    /// DMA or bus address of the `RknpuTask[]` array.
     pub task_base_addr: u64,
-    /// 由驱动填充：硬件执行时间（纳秒）。
+    /// Filled by the driver with a hardware execution-time estimate.
     pub hw_elapse_time: i64,
-    /// 选择要使用哪个 NPU 核心的位掩码。
+    /// Bitmask selecting which NPU cores may be used.
     pub core_mask: u32,
-    /// 用于同步栅栏的文件描述符（进程间 GPU/NPU 同步）。
+    /// Fence file descriptor for external synchronization.
     pub fence_fd: i32,
-    /// 每个核心的任务范围。条目 `i` 描述索引 `i` 处核心的任务。
-    /// `task_number == 0` 的条目被跳过。
+    /// Task range per logical core slot. Entries with `task_number == 0` are
+    /// skipped.
     pub subcore_task: [RknpuSubcoreTask; 5],
 }
 
-/// 用于分配 DMA 可访问缓冲区（GEM 对象）的 Ioctl 结构。
-///
-/// 用户空间填充 `size`（以及可选的 `flags`），调用 ioctl(MEM_CREATE)，
-/// 驱动填充其余字段，以便用户空间知道：
-/// - `handle`   — 用于未来 ioctl 调用的不透明标识符
-/// - `dma_addr` — NPU 将用于读/写此缓冲区的总线地址
-/// - `obj_addr` — 用于直接读/写的 CPU 虚拟地址
+/// Ioctl structure used to allocate a DMA-visible buffer.
 #[repr(C)]
 #[derive(Debug, Clone, Default)]
 pub struct RknpuMemCreate {
-    /// 驱动分配的不透明句柄（输出）。
+    /// Opaque handle returned by the driver.
     pub handle: u32,
-    /// 内存类型/缓存属性标志（输入）。
+    /// Memory type or caching flags.
     pub flags: u32,
-    /// 请求的分配大小（字节）（输入，应为页对齐）。
+    /// Requested allocation size in bytes.
     pub size: u64,
-    /// 缓冲区的 CPU 虚拟地址（输出）。
+    /// CPU virtual address of the allocation.
     pub obj_addr: u64,
-    /// NPU 可访问的 DMA 总线地址（输出）。
+    /// DMA or bus address used by the NPU.
     pub dma_addr: u64,
-    /// 实际分配的大小，在 SRAM 路径上可能与 `size` 不同（输出）。
+    /// Actual allocated size, which may differ on special paths.
     pub sram_size: u64,
-    /// 用于地址隔离的 IOMMU 域（输入）。
+    /// IOMMU domain used for isolation.
     pub iommu_domain_id: i32,
-    /// 核心掩码提示（保留/填充）。
+    /// Reserved or advisory core-mask field.
     pub core_mask: u32,
 }
 
-/// 用于刷新/使 DMA 缓冲区区域无效的 Ioctl 结构。
-///
-/// 当平台没有硬件一致性 DMA 时，用于确保 CPU 写入和 NPU 读取
-/// （或反之）之间的缓存一致性。
+/// Ioctl structure used to synchronize a DMA buffer range.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RknpuMemSync {
-    /// 方向标志（TO_DEVICE、FROM_DEVICE 等）。
+    /// Direction flags such as `TO_DEVICE` or `FROM_DEVICE`.
     pub flags: u32,
-    /// 用于 64 位对齐的填充。
+    /// Reserved padding for 64-bit alignment.
     pub reserved: u32,
-    /// 要同步的缓冲区的 CPU 虚拟地址。
+    /// CPU virtual address of the buffer to synchronize.
     pub obj_addr: u64,
-    /// 从缓冲区开始的字节偏移量。
+    /// Byte offset into the buffer.
     pub offset: u64,
-    /// 要同步的字节数。
+    /// Number of bytes to synchronize.
     pub size: u64,
 }
 

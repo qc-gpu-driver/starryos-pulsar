@@ -21,8 +21,8 @@ const DRM_COMMAND_BASE: u32 = 0x40;
 /// End value for DRM ioctl commands
 const DRM_COMMAND_END: u32 = 0xA0;
 
-/// DRM version information structure, corresponds to Linux's `struct drm_version`
-/// Used for ioctl: DRM_IOCTL_VERSION
+/// DRM version information structure, corresponds to Linux's `struct
+/// drm_version` Used for ioctl: DRM_IOCTL_VERSION
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Default)]
 pub struct DrmVersion {
@@ -45,7 +45,6 @@ pub struct DrmVersion {
     /// Pointer to user-space buffer holding description
     pub desc: *mut c_char,
 }
-
 
 /// Extracts the ioctl command number from a DRM ioctl command
 pub fn ioctl_nr(cmd: u32) -> u32 {

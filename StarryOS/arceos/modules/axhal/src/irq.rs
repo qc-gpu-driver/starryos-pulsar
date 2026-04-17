@@ -15,8 +15,10 @@ static REGISTERED: [AtomicBool; 2048] = [const { AtomicBool::new(false) }; 2048]
 
 fn poll_handler(irq: usize) {
     unsafe extern "C" {
+    #[cfg(target_arch = "aarch64")]
         fn handle_console_irq(irq: u32) -> u64;
     }
+    #[cfg(target_arch = "aarch64")]
     unsafe { handle_console_irq(irq as u32) };
     POLL_TABLE[irq].wake();
 }

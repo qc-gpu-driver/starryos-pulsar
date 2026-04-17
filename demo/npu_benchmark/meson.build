@@ -37,6 +37,30 @@ matmul_llama_concurrent = executable(
     'tests/matmul_llama_concurrent.c'
 )
 
+three_core_task = executable(
+    'three_core_task',
+    'tests/three_core_task.c',
+    include_directories : incdir,
+    link_with : lib,
+    link_args : '-lm'
+)
+
+core_scaling_benchmark = executable(
+    'core_scaling_benchmark',
+    'tests/core_scaling_benchmark.c',
+    include_directories : incdir,
+    link_with : lib,
+    link_args : '-lm'
+)
+
+rknpu_action_smoke = executable(
+    'rknpu_action_smoke',
+    'tests/rknpu_action_smoke.c',
+    include_directories : incdir,
+    link_with : lib
+)
+test('rknpu action smoke', rknpu_action_smoke, is_parallel : false)
+
 test_matmul_int8  = executable('matmul_int8', 'tests/matmul_int8.c', include_directories : incdir, link_with : lib, link_args : '-lm')
 test('matmul int8 1x32x32',test_matmul_int8, is_parallel : false , args : ['1','32','32'])
 test('matmul int8 1x64x64',test_matmul_int8, is_parallel : false , args : ['1','64','64'])

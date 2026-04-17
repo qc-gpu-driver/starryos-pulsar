@@ -135,6 +135,8 @@ enum e_rknpu_action {
         RKNPU_POWER_OFF = 21,
         RKNPU_GET_TOTAL_SRAM_SIZE = 22,
         RKNPU_GET_FREE_SRAM_SIZE = 23,
+        RKNPU_GET_IOMMU_DOMAIN_ID = 24,
+        RKNPU_SET_IOMMU_DOMAIN_ID = 25,
 };
 
 /**

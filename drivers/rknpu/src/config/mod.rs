@@ -1,14 +1,20 @@
-//! 从 C 语言 `struct rknpu_config` 翻译而来的 RKNPU 配置绑定。
+//! RKNPU configuration bindings translated from the original C
+//! `struct rknpu_config`.
 //!
-//! 本模块提供了 `#[repr(C)]` 的 Rust 等价结构，适用于 FFI
-//! 或直接翻译内核风格的配置数据。
+//! This module keeps a small `#[repr(C)]`-compatible Rust view of the board or
+//! SoC configuration used by the rest of the driver.
 
+/// Supported RKNPU hardware variants.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RknpuType {
+    /// Rockchip RK3588 NPU.
     Rk3588,
 }
 
+/// Top-level static configuration for one RKNPU instance.
 #[derive(Debug, Clone)]
 pub struct RknpuConfig {
+    /// Chip variant used to select hardware-specific register and capability
+    /// data.
     pub rknpu_type: RknpuType,
 }

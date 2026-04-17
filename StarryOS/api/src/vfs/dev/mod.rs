@@ -12,7 +12,6 @@ mod log;
 mod r#loop;
 #[cfg(feature = "memtrack")]
 mod memtrack;
-mod rknpu_scheduler;
 mod rtc;
 pub mod tty;
 

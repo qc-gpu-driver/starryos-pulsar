@@ -1,23 +1,27 @@
-use alloc::vec;
+use alloc::string::ToString;
 use core::{
     any::Any,
     convert::TryFrom,
     ffi::{CStr, c_char, c_ulong},
     mem,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
+use axerrno::AxError;
 use axfs_ng_vfs::{DeviceId, NodeFlags, VfsError, VfsResult};
+use axtask::future::block_on;
+use event_listener::Event;
+use lazy_static::lazy_static;
 use memory_addr::{MemoryAddr, PhysAddrRange};
-use rknpu::{
-    RknpuAction, RknpuQueuedSubmit, RknpuTask,
-    ioctrl::{RknpuMemCreate, RknpuMemDestroy, RknpuMemMap, RknpuSubmit},
+use rknpu::service::{
+    RknpuCmd, RknpuDeviceAccess, RknpuSchedulerRuntime, RknpuService, RknpuServiceError,
+    RknpuSubmitWaiter, RknpuUserMemory, RknpuWorkerListener, RknpuWorkerSignal,
 };
-use starry_core::vfs::DeviceMmap;
+use starry_core::{futex::WaitQueue, vfs::DeviceMmap};
 
 use super::{
-    card0::{RknpuCmd, copy_from_user, copy_to_user},
+    card0::{copy_from_user, copy_to_user},
     drm::DrmVersion,
-    rknpu_scheduler::{enqueue_submit, take_terminal_submit, wait_for_submit},
 };
 use crate::vfs::{
     DeviceOps,
@@ -37,8 +41,6 @@ pub const CARD1_SYSTEM_DEVICE_ID: DeviceId = DeviceId::new(0xe2, 1);
 /// Device ID for /dev/rknpu (pick an unused major/minor)
 pub const RKNPU_DEVICE_ID: DeviceId = DeviceId::new(251, 0);
 
-/// Page shift constant (4KB pages)
-const PAGE_SHIFT: u32 = 12;
 /// Maximum ioctl command number
 const MAX_IOCTL_NR: u32 = 0xcf;
 /// Stack data buffer size
@@ -63,23 +65,148 @@ pub struct DrmUnique {
     pub unique: *mut c_char,
 }
 
-/// Represents an RKNPU user action with flags and value
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-struct RknpuUserAction {
-    /// Action flags
-    pub flags: RknpuAction,
-    /// Action value
-    pub value: u32,
+const SUBMIT_WAIT_MASK: u32 = u32::MAX;
+
+#[derive(Default, Clone, Copy)]
+struct StarryPlatform;
+
+struct StarrySubmitWaiter {
+    done: AtomicBool,
+    wait_queue: WaitQueue,
 }
 
-impl RknpuUserAction {
-    /// Creates a new RknpuUserAction with default values
-    pub fn default() -> Self {
+impl StarrySubmitWaiter {
+    fn new() -> Self {
         Self {
-            flags: RknpuAction::GetDrvVersion,
-            value: 0,
+            done: AtomicBool::new(false),
+            wait_queue: WaitQueue::new(),
         }
+    }
+}
+
+impl RknpuSubmitWaiter for StarrySubmitWaiter {
+    fn wait(&self) -> Result<(), RknpuServiceError> {
+        while !self.done.load(Ordering::Acquire) {
+            self.wait_queue
+                .wait_if(SUBMIT_WAIT_MASK, None, || {
+                    !self.done.load(Ordering::Acquire)
+                })
+                .map_err(|err| match err {
+                    AxError::Interrupted => RknpuServiceError::Interrupted,
+                    _ => RknpuServiceError::InvalidData,
+                })?;
+        }
+        Ok(())
+    }
+
+    fn complete(&self) {
+        self.done.store(true, Ordering::Release);
+        self.wait_queue.wake(usize::MAX, SUBMIT_WAIT_MASK);
+    }
+}
+
+struct StarryWorkerSignal {
+    event: Event,
+}
+
+struct StarryWorkerListener(event_listener::EventListener);
+
+impl RknpuWorkerListener for StarryWorkerListener {
+    fn wait(self) {
+        let _ = block_on(self.0);
+    }
+}
+
+impl RknpuWorkerSignal for StarryWorkerSignal {
+    type Listener = StarryWorkerListener;
+
+    fn listen(&self) -> Self::Listener {
+        StarryWorkerListener(self.event.listen())
+    }
+
+    fn notify_one(&self) {
+        self.event.notify_relaxed(1);
+    }
+}
+
+impl RknpuDeviceAccess for StarryPlatform {
+    fn with_device<T, F>(&self, f: F) -> Result<T, RknpuServiceError>
+    where
+        F: FnOnce(&mut ::rknpu::Rknpu) -> Result<T, ::rknpu::RknpuError>,
+    {
+        let mut dev = npu().map_err(map_vfs_to_service_error)?;
+        f(&mut dev).map_err(RknpuServiceError::from)
+    }
+}
+
+impl RknpuUserMemory for StarryPlatform {
+    fn copy_from_user(
+        &self,
+        dst: *mut u8,
+        src: *const u8,
+        size: usize,
+    ) -> Result<(), RknpuServiceError> {
+        copy_from_user(dst, src, size).map_err(|_| RknpuServiceError::InvalidData)
+    }
+
+    fn copy_to_user(
+        &self,
+        dst: *mut u8,
+        src: *const u8,
+        size: usize,
+    ) -> Result<(), RknpuServiceError> {
+        copy_to_user(dst, src, size).map_err(|_| RknpuServiceError::InvalidData)
+    }
+}
+
+impl RknpuSchedulerRuntime for StarryPlatform {
+    type Waiter = StarrySubmitWaiter;
+    type WorkerSignal = StarryWorkerSignal;
+
+    fn new_waiter(&self) -> Self::Waiter {
+        StarrySubmitWaiter::new()
+    }
+
+    fn new_worker_signal(&self) -> Self::WorkerSignal {
+        StarryWorkerSignal {
+            event: Event::new(),
+        }
+    }
+
+    fn spawn_worker<F>(&self, f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        axtask::spawn(f, "rknpu-scheduler".to_string());
+    }
+
+    fn yield_now(&self) {
+        axtask::yield_now();
+    }
+}
+
+lazy_static! {
+    static ref RKNPU_SERVICE: RknpuService<StarryPlatform> = RknpuService::new(StarryPlatform);
+}
+
+fn map_vfs_to_service_error(err: VfsError) -> RknpuServiceError {
+    match err {
+        VfsError::NotFound => RknpuServiceError::NotFound,
+        VfsError::AddressInUse => RknpuServiceError::Busy,
+        VfsError::BadIoctl => RknpuServiceError::BadIoctl,
+        _ => RknpuServiceError::InvalidData,
+    }
+}
+
+fn map_service_error(err: RknpuServiceError) -> VfsError {
+    match err {
+        RknpuServiceError::InvalidInput => VfsError::InvalidInput,
+        RknpuServiceError::InvalidData => VfsError::InvalidData,
+        RknpuServiceError::NotFound => VfsError::NotFound,
+        RknpuServiceError::Busy => VfsError::AddressInUse,
+        RknpuServiceError::Interrupted => AxError::Interrupted.into(),
+        RknpuServiceError::BadIoctl => VfsError::BadIoctl,
+        RknpuServiceError::Driver(_) | RknpuServiceError::Internal => VfsError::InvalidData,
     }
 }
 
@@ -233,272 +360,10 @@ where
 /// Handles RKNPU action ioctl commands
 pub fn rknpu_driver_ioctl(op: RknpuCmd, arg: usize) -> VfsResult<usize> {
     info!("rknpu_driver_ioctl: op = {:?}", op);
-    match op {
-        RknpuCmd::Submit => {
-            // This ioctl still looks blocking from userspace, but internally
-            // the calling thread no longer advances the submit by repeatedly
-            // dispatching tasks itself.
-            //
-            // The new lifecycle is:
-            //   1. copy the userspace submit/task array into kernel shadow memory
-            //   2. enqueue one whole submit into the global NPU scheduler
-            //   3. put only this submitter thread to sleep
-            //   4. let the worker thread dispatch and harvest work per core
-            //   5. wake this thread once the whole submit becomes terminal
-            //
-            // While this thread sleeps, other threads continue running
-            // normally. They may enter the same ioctl path and enqueue new NPU
-            // submits, which is how multiple processes share the device now.
-            let mut submit_args = RknpuSubmit::default();
-            copy_from_user(
-                &mut submit_args as *mut _ as *mut u8,
-                arg as *const u8,
-                mem::size_of::<RknpuSubmit>(),
-            )?;
-            info!("rknpu submit ioctl {submit_args:#x?}");
-
-            if submit_args.task_number == 0 || submit_args.task_obj_addr == 0 {
-                warn!(
-                    "rknpu invalid submit header: task_number={}, task_obj_addr={:#x}, \
-                     task_base_addr={:#x}",
-                    submit_args.task_number, submit_args.task_obj_addr, submit_args.task_base_addr,
-                );
-                warn!("rknpu submit ioctl rejected invalid submit header");
-                return Err(VfsError::InvalidData);
-            }
-
-            if submit_args.task_base_addr == 0 {
-                debug!(
-                    "rknpu submit header keeps legacy zero task_base_addr, scheduler will \
-                     preserve zero DMA base"
-                );
-            }
-
-            let user_task_obj_addr = submit_args.task_obj_addr;
-            let task_bytes = (submit_args.task_number as usize)
-                .checked_mul(mem::size_of::<RknpuTask>())
-                .ok_or(VfsError::InvalidData)?;
-            let mut tasks = vec![RknpuTask::default(); submit_args.task_number as usize];
-            copy_from_user(
-                tasks.as_mut_ptr() as *mut u8,
-                user_task_obj_addr as *const u8,
-                task_bytes,
-            )?;
-
-            // `enqueue_submit()` only inserts the task into the scheduler and
-            // kicks the worker if needed. It does not run the whole submission
-            // inline on behalf of this syscall thread.
-            warn!(
-                "[rknpu-submit] queueing blocking submit task_number={} core_mask={:#x} \
-                 timeout={} task_base_addr={:#x} user_task_obj_addr={:#x}",
-                submit_args.task_number,
-                submit_args.core_mask,
-                submit_args.timeout,
-                submit_args.task_base_addr,
-                user_task_obj_addr
-            );
-            let queue_task_id = enqueue_submit(RknpuQueuedSubmit::new(submit_args.clone(), tasks))
-                .inspect_err(|e| warn!("[rknpu-submit] enqueue_submit failed: {:?}", e))?;
-
-            warn!(
-                "[rknpu-submit] enqueued queue_task={} and entering blocking wait",
-                queue_task_id
-            );
-
-            // Sleep until the queue entry is terminal. This blocks only the
-            // current thread. The worker keeps driving the NPU, and other CPU
-            // threads remain free to run or enqueue more NPU work.
-            wait_for_submit(queue_task_id).inspect_err(|e| {
-                warn!(
-                    "[rknpu-submit] wait_for_submit failed for queue_task={}: {:?}",
-                    queue_task_id, e
-                )
-            })?;
-
-            warn!(
-                "[rknpu-submit] blocking wait finished for queue_task={}, collecting terminal \
-                 snapshot",
-                queue_task_id
-            );
-
-            // After wake-up the queue entry is already terminal. Copy the
-            // kernel-owned shadow task array back into the caller's task
-            // buffer, then write the final submit header back to the ioctl
-            // argument so userspace sees the completed counters/status fields.
-            let finished = take_terminal_submit(queue_task_id).inspect_err(|e| {
-                warn!(
-                    "[rknpu-submit] take_terminal_submit failed for queue_task={}: {:?}",
-                    queue_task_id, e
-                )
-            })?;
-            let mut finished_submit = finished.submit;
-            finished_submit.task_obj_addr = user_task_obj_addr;
-
-            warn!(
-                "[rknpu-submit] terminal queue_task={} task_counter={} last_error={:?}",
-                queue_task_id, finished_submit.task_counter, finished.last_error
-            );
-
-            copy_to_user(
-                user_task_obj_addr as *mut u8,
-                finished.tasks.as_ptr() as *const u8,
-                task_bytes,
-            )?;
-
-            copy_to_user(
-                arg as *mut u8,
-                &finished_submit as *const _ as *const u8,
-                mem::size_of::<RknpuSubmit>(),
-            )?;
-
-            if let Some(err) = finished.last_error {
-                warn!("rknpu submit ioctl completed with driver error: {:?}", err);
-                return Err(VfsError::InvalidData);
-            }
-        }
-        RknpuCmd::MemCreate => {
-            info!("rknpu mem_create ioctl");
-            let mut mem_create_args = RknpuMemCreate::default();
-
-            copy_from_user(
-                &mut mem_create_args as *mut _ as *mut u8,
-                arg as *const u8,
-                mem::size_of::<RknpuMemCreate>(),
-            )?;
-
-            with_npu(|rknpu_dev| {
-                rknpu_dev
-                    .create(&mut mem_create_args)
-                    .map_err(|_| VfsError::InvalidData)
-            })
-            .inspect_err(|e| warn!("rknpu mem_create ioctl failed: {:?}", e))?;
-
-            copy_to_user(
-                arg as *mut u8,
-                &mem_create_args as *const _ as *const u8,
-                mem::size_of::<RknpuMemCreate>(),
-            )?;
-        }
-        RknpuCmd::MemMap => {
-            info!("rknpu mem_map ioctl");
-            let mut mem_map = RknpuMemMap::default();
-            copy_from_user(
-                &mut mem_map as *mut _ as *mut u8,
-                arg as *const u8,
-                mem::size_of::<RknpuMemMap>(),
-            )?;
-
-            with_npu(|rknpu_dev| {
-                if rknpu_dev.get_phys_addr_and_size(mem_map.handle).is_some() {
-                    mem_map.offset = (mem_map.handle as u64) << PAGE_SHIFT;
-
-                    info!(
-                        "mem_map: handle={} -> offset=0x{:x}",
-                        mem_map.handle, mem_map.offset
-                    );
-                    Ok(())
-                } else {
-                    warn!("mem_map: invalid handle={}", mem_map.handle);
-                    Err(VfsError::InvalidData)
-                }
-            })
-            .inspect_err(|e| warn!("rknpu mem_map ioctl failed: {:?}", e))?;
-
-            copy_to_user(
-                arg as *mut u8,
-                &mem_map as *const _ as *const u8,
-                mem::size_of::<RknpuMemMap>(),
-            )?;
-        }
-        RknpuCmd::MemDestroy => {
-            let mut mem_destroy = RknpuMemDestroy::default();
-            copy_from_user(
-                &mut mem_destroy as *mut _ as *mut u8,
-                arg as *const u8,
-                mem::size_of::<RknpuMemDestroy>(),
-            )?;
-
-            warn!(
-                "[rknpu] mem_destroy ioctl handle={} obj_addr={:#x}",
-                mem_destroy.handle, mem_destroy.obj_addr
-            );
-
-            with_npu(|rknpu_dev| {
-                if rknpu_dev
-                    .get_phys_addr_and_size(mem_destroy.handle)
-                    .is_none()
-                {
-                    warn!(
-                        "[rknpu] mem_destroy ignored unknown handle={} obj_addr={:#x}",
-                        mem_destroy.handle, mem_destroy.obj_addr
-                    );
-                    return Ok(());
-                }
-
-                rknpu_dev.destroy(mem_destroy.handle);
-                Ok(())
-            })
-            .inspect_err(|e| warn!("rknpu mem_destroy ioctl failed: {:?}", e))?;
-        }
-        RknpuCmd::MemSync => {
-            info!("rknpu mem_sync ioctl");
-        }
-        _ => {
-            info!("rknpu action ioctl");
-            let mut action = RknpuUserAction::default();
-            copy_from_user(
-                &mut action as *mut _ as *mut u8,
-                arg as *const u8,
-                mem::size_of::<RknpuUserAction>(),
-            )?;
-
-            info!(
-                "rknpu action ioctl: flags = {:?}, value = {}",
-                action.flags, action.value
-            );
-
-            with_npu(|rknpu_dev| {
-                let val = rknpu_dev
-                    .action(action.flags, action.value)
-                    .map_err(|_| VfsError::InvalidData)?;
-                action.value = val;
-                Ok(())
-            })
-            .inspect_err(|e| warn!("rknpu action ioctl failed: {:?}", e))?;
-
-            copy_to_user(
-                arg as *mut u8,
-                &action as *const _ as *const u8,
-                mem::size_of::<RknpuUserAction>(),
-            )?;
-        }
-    }
-    Ok(0)
-}
-
-/// Handles RKNPU memory create ioctl command
-pub fn rknpu_mem_create_ioctl(arg: usize) -> VfsResult<usize> {
-    let mut mem_create_args = RknpuMemCreate::default();
-
-    copy_from_user(
-        &mut mem_create_args as *mut _ as *mut u8,
-        arg as *const u8,
-        mem::size_of::<RknpuMemCreate>(),
-    )?;
-
-    with_npu(|rknpu_dev| {
-        rknpu_dev
-            .create(&mut mem_create_args)
-            .map_err(|_| VfsError::InvalidData)
+    RKNPU_SERVICE.driver_ioctl(op, arg).map_err(|err| {
+        warn!("rknpu driver ioctl failed: {:?}", err);
+        map_service_error(err)
     })
-    .inspect_err(|e| warn!("rknpu mem_create ioctl failed: {:?}", e))?;
-
-    copy_to_user(
-        arg as *mut u8,
-        &mem_create_args as *const _ as *const u8,
-        mem::size_of::<RknpuMemCreate>(),
-    )?;
-    Ok(0)
 }
 
 /// DRM_IOCTL_GEM_FLINK ioctl argument type

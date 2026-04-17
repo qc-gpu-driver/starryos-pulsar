@@ -13,7 +13,6 @@ extern crate alloc;
 extern crate log;
 
 mod blk;
-mod rknpu;
 mod soc;
 mod serial;
 

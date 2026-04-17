@@ -5,7 +5,6 @@
 
 #define SYS_DMA_MALLOC 400
 #define SYS_DMA_FREE 401
-#define SYS_DUMP_NPU_STATUS 403
 
 #if defined(__aarch64__)
 static inline long libnpu_syscall1(long sysno, long arg0) {
@@ -71,17 +70,6 @@ int dma_free(void *ptr) {
   }
 
   ret = libnpu_syscall1(SYS_DMA_FREE, (long)(uintptr_t)ptr);
-  if (ret < 0) {
-    errno = (int)-ret;
-    return -1;
-  }
-
-  return 0;
-}
-
-int npu_dump_status(const libnpu_submit *submit) {
-  long ret = libnpu_syscall1(SYS_DUMP_NPU_STATUS, (long)(uintptr_t)submit);
-
   if (ret < 0) {
     errno = (int)-ret;
     return -1;

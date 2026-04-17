@@ -1,6 +1,5 @@
 use core::{
     any::Any,
-    convert::TryFrom,
     ffi::{c_char, c_ulong},
 };
 
@@ -225,47 +224,6 @@ pub fn copy_to_user(dst: *mut u8, src: *const u8, size: usize) -> Result<(), axi
         return Err(VfsError::InvalidData);
     }
     Ok(())
-}
-
-/// RKNPU command types
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RknpuCmd {
-    /// Action command
-    Action     = 0x00,
-    /// Submit command
-    Submit     = 0x01,
-    /// Memory create command
-    MemCreate  = 0x02,
-    /// Memory map command
-    MemMap     = 0x03,
-    /// Memory destroy command
-    MemDestroy = 0x04,
-    /// Memory sync command
-    MemSync    = 0x05,
-    /// Dump current process-level NPU status
-    DumpStatus = 0x06,
-}
-
-impl TryFrom<u32> for RknpuCmd {
-    type Error = ();
-
-    /// Tries to convert a u32 value to an RknpuCmd
-    fn try_from(nr: u32) -> Result<Self, Self::Error> {
-        match nr {
-            0x00 | 0x40 => Ok(RknpuCmd::Action),
-            0x01 | 0x41 => Ok(RknpuCmd::Submit),
-            0x02 | 0x42 => Ok(RknpuCmd::MemCreate),
-            0x03 | 0x43 => Ok(RknpuCmd::MemMap),
-            0x04 | 0x44 => Ok(RknpuCmd::MemDestroy),
-            0x05 | 0x45 => Ok(RknpuCmd::MemSync),
-            0x06 | 0x46 => Ok(RknpuCmd::DumpStatus),
-            _ => {
-                warn!("Unknown ioctl nr: {nr:#x}",);
-                Err(())
-            }
-        }
-    }
 }
 
 /// DRM_IOCTL_GET_UNIQUE ioctl argument type.

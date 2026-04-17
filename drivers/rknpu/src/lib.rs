@@ -1,61 +1,10 @@
-//! 瑞芯微 RK3588 NPU（神经处理单元）的低级驱动。
-//!
-//! # 架构概述
-//!
-//! ```text
-//!  ┌─────────────────────────────────────────────────────────────────────┐
-//!  │                        用户空间（rknn 运行时）                      │
-//!  │   加载模型 → 准备张量 → ioctl(SUBMIT) → 读取输出                   │
-//!  └────────────────────────────┬────────────────────────────────────────┘
-//!                               │ ioctl 边界
-//!  ┌────────────────────────────▼────────────────────────────────────────┐
-//!  │                      本 crate（`rknpu`）                            │
-//!  │                                                                     │
-//!  │  lib.rs          Rknpu 结构 — 顶层驱动句柄                          │
-//!  │  ioctrl.rs       ioctl 分发：SUBMIT、MEM_CREATE、MEM_DESTROY       │
-//!  │  gem.rs          DMA 缓冲区池（分配/释放/同步）                      │
-//!  │  job.rs          任务描述符和作业模式标志                            │
-//!  │  registers/      通过 rknpu_regs（svd2rust）访问 MMIO 寄存器       │
-//!  │  task/           高级操作构建器（matmul、conv 等）                  │
-//!  │  osal.rs         OS 无关的类型别名（PhysAddr、DmaAddr 等）          │
-//!  │  err.rs          统一错误枚举                                        │
-//!  └────────────────────────────┬────────────────────────────────────────┘
-//!                               │ MMIO 写入
-//!  ┌────────────────────────────▼────────────────────────────────────────┐
-//!  │                     NPU 硬件（每个核心）                            │
-//!  │                                                                     │
-//!  │  PC  ──►  CNA  ──►  MAC  ──►  DPU  ──►  输出 DMA 缓冲区            │
-//!  │  命令     加载      计算       后处理    （结果张量）                │
-//!  │  获取     特征      (矩阵乘)   (偏置、                              │
-//!  │           + 权重              激活、                                │
-//!  │                               写入)                                 │
-//!  └─────────────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! # 典型的端到端流程
-//!
-//! 1. **探测** — 平台代码通过设备树发现 NPU，映射其 MMIO 区域，
-//!    并使用基地址调用 [`Rknpu::new()`]。
-//! 2. **MEM_CREATE** — 用户空间为输入/输出张量和寄存器命令流
-//!    分配 DMA 缓冲区（参见 [`gem::GemPool`]）。
-//! 3. **准备** — 用户空间（或 `task/` 模块）填充 `RknpuTask[]` 描述符
-//!    和寄存器命令缓冲区，为每个神经网络层对每个流水线阶段
-//!    （CNA、MAC、DPU）进行编程。
-//! 4. **SUBMIT** — 驱动刷新缓存，按单 core / 单 task dispatch 对 PC 模块进行编程并启动执行
-//!    （参见 [`ioctrl::Rknpu::submit_ioctrl_step`]）。
-//! 5. **轮询/IRQ** — 驱动等待 PC 的中断状态位发出完成信号，
-//!    清除它们，并将控制权返回给用户空间。
-//! 6. **读取结果** — 用户空间从 DMA 缓冲区读取输出张量。
-//!
-//! # Crate 特性
-//!
-//! - `no_std` 兼容 — 在裸机和自定义 OS 内核上运行。
-//! - 通过 `rknpu_regs` svd2rust crate 进行类型安全的寄存器访问。
-//! - DMA 缓冲区通过平台 `dma_api` crate 管理。
+
 
 #![no_std]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 #[macro_use]
 extern crate log;
 use core::{
@@ -71,6 +20,11 @@ mod gem;
 mod job;
 mod osal;
 mod registers;
+pub mod power;
+pub mod service;
+mod irq;
+mod tool;
+mod npuprobe;
 pub mod status;
 mod task;
 use alloc::vec::Vec;
@@ -84,6 +38,7 @@ pub use status::*;
 pub use task::*;
 pub mod ioctrl;
 use crate::data::RknpuData;
+pub use crate::power::*;
 use crate::registers::RknpuCore;
 
 const VERSION_MAJOR: u32 = 0;
@@ -94,10 +49,10 @@ const fn version(major: u32, minor: u32, patch: u32) -> u32 {
     major * 10000 + minor * 100 + patch
 }
 
-/// 可以通过 [`Rknpu::action()`] 请求的硬件操作。
+/// Hardware actions that may be requested through [`Rknpu::action()`].
 ///
-/// 这些镜像了 Linux 内核驱动的 ioctl 操作代码。
-/// 大多数是管理/诊断操作而不是计算任务。
+/// These mirror the Linux-style driver action codes. Most of them are
+/// management or diagnostic operations rather than compute submissions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum RknpuAction {
@@ -129,33 +84,32 @@ pub enum RknpuAction {
     SetIommuDomainId = 25,
 }
 
-/// 一个 RKNPU 设备的顶层驱动句柄。
+/// Top-level driver handle for one RKNPU device.
 ///
-/// 拥有所有核心的 MMIO 寄存器窗口、芯片特定的配置数据和 GEM 内存池。
-/// 所有驱动操作（提交、操作、内存创建/销毁）都通过此结构进行。
+/// It owns the MMIO windows for all visible cores, the chip-specific capability
+/// data, and the GEM pool shared with userspace. Submission, action, and memory
+/// management all flow through this type.
 ///
-/// # 完成等待模式
+/// # Completion waiting
 ///
-/// 默认情况下，驱动在提交任务后**忙轮询** INTERRUPT_STATUS 寄存器
-/// （向后兼容）。调用 [`set_wait_fn`] 切换到**中断驱动**模式：
+/// By default the driver remains backward-compatible and busy-polls
+/// `INTERRUPT_STATUS` after a submit. Calling [`set_wait_fn`] switches the
+/// driver to an interrupt-assisted wait path:
 ///
 /// ```text
-///  默认（无 wait_fn）：   submit → loop { 读取 MMIO 寄存器 } → 完成
-///  使用 wait_fn（例如 WFI）：submit → loop { 检查原子变量; wfi() } → IRQ
-///                           触发 → 处理程序存储状态 → CPU 唤醒 → 完成
+///  default (no wait_fn): submit -> loop { read MMIO } -> done
+///  with wait_fn:         submit -> loop { check atomic; sleep } -> IRQ
+///                        arrives -> handler stores status -> CPU wakes -> done
 /// ```
 pub struct Rknpu {
-    /// 每个核心的寄存器访问包装器。`base[0]` 是核心 0，依此类推。
-    /// 每个 `RknpuCore` 持有指向其 MMIO 基地址的 `NonNull<u8>` 和
-    /// 用于中断驱动完成的共享 `irq_status` 原子变量。
+    /// Register-access wrapper per visible core.
     base: Vec<RknpuCore>,
-    /// 静态板/SoC 配置（时钟、电源、IRQ 路由等）。
+    /// Static board or SoC configuration.
     #[allow(dead_code)]
     config: RknpuConfig,
-    /// 芯片变体数据（RK3588 vs RK3568 等）— 寄存器特性、
-    /// 最大任务计数、DMA 掩码、中断位布局。
+    /// Variant-specific data such as DMA limits and register quirks.
     data: RknpuData,
-    /// NPU 和系统内存之间是否有活动的 IOMMU。
+    /// Whether an IOMMU sits between the NPU and system memory.
     iommu_enabled: bool,
     /// Current logical IOMMU domain id exposed through the action ioctl.
     ///
@@ -165,22 +119,21 @@ pub struct Rknpu {
     iommu_domain_id: i32,
     /// DMA buffer pool shared with userspace (see [`gem`] module).
     pub(crate) gem: GemPool,
-    /// 用于中断驱动模式的可选平台提供的等待函数。
+    /// Optional platform-provided wait function used for interrupt-driven mode.
     ///
-    /// - `None`（默认）→ 直接忙轮询 MMIO 寄存器。
-    /// - `Some(wfi)` → 在原子检查之间在 WFI 中休眠；NPU IRQ
-    ///   唤醒 CPU，处理程序将状态存储到原子变量，
-    ///   提交循环在下一次迭代时看到它。
+    /// `None` keeps the legacy polling path. `Some(f)` lets the driver sleep
+    /// between atomic checks and resume when an IRQ wakes the CPU.
     wait_fn: Option<fn()>,
 }
 
 impl Rknpu {
-    /// 从原始 MMIO 基地址创建新的 RKNPU 接口。
+    /// Create a new driver instance from raw MMIO base addresses.
     ///
-    /// # 安全性
+    /// # Safety
     ///
-    /// 调用者必须确保 `base_addr` 是正确映射和对齐的 RKNPU 寄存器文件的
-    /// 物理地址，并且在返回结构的生命周期内保持有效。
+    /// The caller must ensure that every pointer in `base_addrs` points to a
+    /// valid mapped RKNPU register file and remains valid for the lifetime of
+    /// the returned object.
     pub fn new(base_addrs: &[NonNull<u8>], config: RknpuConfig) -> Self {
         let data = RknpuData::new(config.rknpu_type);
 
@@ -203,25 +156,23 @@ impl Rknpu {
         Ok(())
     }
 
-    /// 通过提供平台休眠函数来启用中断驱动等待。
+    /// Enable interrupt-driven waiting by installing a platform sleep function.
     ///
-    /// 调用此函数后，`submit_one()` 将不再忙轮询 MMIO 寄存器。
-    /// 相反，它检查共享的 `irq_status` 原子变量，并在检查之间调用 `f()` 休眠。
-    /// NPU 中断唤醒 CPU。
+    /// After this call the submit path stops busy-polling MMIO directly and
+    /// instead checks the shared `irq_status` atomic between calls to `f()`.
     ///
-    /// # 典型用法（AArch64）
+    /// Typical AArch64 usage:
     ///
     /// ```ignore
-    /// // 注册 NPU IRQ 处理程序后：
-    /// npu.set_wait_fn(axcpu::wait_for_irqs);  // 调用 WFI 指令
+    /// // After registering the NPU IRQ handler:
+    /// npu.set_wait_fn(axcpu::wait_for_irqs);
     /// ```
     ///
-    /// # 安全注意事项
+    /// Safety notes:
     ///
-    /// 提供的函数必须在**任何**中断触发时返回（包括 NPU 中断）。
-    /// AArch64 上的 `WFI` 满足此要求。
-    /// 平台还必须在调用此函数之前通过 [`new_irq_handler`](Rknpu::new_irq_handler)
-    /// 注册 NPU IRQ。
+    /// The provided function must return when any interrupt arrives, including
+    /// the NPU IRQ. The platform must also register the NPU IRQ before relying
+    /// on this mode.
     pub fn set_wait_fn(&mut self, f: fn()) {
         warn!("[NPU] Interrupt-driven mode enabled (WFI)");
         self.wait_fn = Some(f);
@@ -373,10 +324,10 @@ impl Rknpu {
         Ok(())
     }
 
-    /// 根据提供的操作请求执行 RKNPU 操作
+    /// Execute an `RknpuAction` request.
     ///
-    /// 此函数镜像了 Linux 驱动的 rknpu_action 实现，
-    /// 为硬件操作提供 Rust 安全接口。
+    /// This mirrors the Linux driver's `rknpu_action` path and provides a Rust
+    /// interface for hardware management operations.
     pub fn action(&mut self, action: RknpuAction, value: u32) -> Result<u32, RknpuError> {
         match action {
             RknpuAction::GetHwVersion => Ok(self.get_hw_version()),
@@ -491,40 +442,10 @@ impl Rknpu {
         self.iommu_enabled = enabled;
     }
 
-    // /// Commit a prepared job descriptor to the hardware command parser.
-    // pub fn commit_job(&mut self, job: &mut RknpuJob) -> Result<(), RknpuError> {
-    //     self.job_commit(job)
-    // }
-
-    // fn job_commit(&mut self, job: &mut RknpuJob) -> Result<(), RknpuError> {
-    //     const CORE0_1_MASK: u32 = RKNPU_CORE0_MASK | RKNPU_CORE1_MASK;
-    //     const CORE0_1_2_MASK: u32 = RKNPU_CORE0_MASK | RKNPU_CORE1_MASK | RKNPU_CORE2_MASK;
-
-    //     match job.args.core_mask {
-    //         RKNPU_CORE0_MASK => self.sub_core_submit(job, 0)?,
-    //         RKNPU_CORE1_MASK => self.sub_core_submit(job, 1)?,
-    //         RKNPU_CORE2_MASK => self.sub_core_submit(job, 2)?,
-    //         CORE0_1_MASK => {
-    //             self.sub_core_submit(job, 0)?;
-    //             self.sub_core_submit(job, 1)?;
-    //         }
-    //         CORE0_1_2_MASK => {
-    //             self.sub_core_submit(job, 0)?;
-    //             self.sub_core_submit(job, 1)?;
-    //             self.sub_core_submit(job, 2)?;
-    //         }
-    //         _ => {
-    //             error!("Invalid core mask: 0x{:x}", job.args.core_mask);
-    //         }
-    //     }
-
-    //     Ok(())
-    // }
-
-    /// 将预构建的任务批次提交到核心 0（高级 API）。
+    /// Submit one prebuilt task batch to core 0 through the high-level API.
     ///
-    /// 与 ioctl 路径的单 task 步进不同，
-    /// 这接受由 `task/` 模块构建的具有适当 DMA 缓冲区的 [`Submit`]。
+    /// Unlike the ioctl path, which steps one task at a time, this accepts a
+    /// [`Submit`] object built by the `task/` module.
     pub fn submit(&mut self, job: &mut Submit) -> Result<(), RknpuError> {
         self.base[0].submit(&self.data, self.wait_fn, job)
     }
@@ -557,35 +478,34 @@ impl Rknpu {
         completed
     }
 
-    /// 读取并清除核心 0 上的挂起中断。
+    /// Read and clear pending interrupt state on core 0.
     ///
-    /// 返回模糊状态位掩码 — 非零表示自上次调用以来至少有一个
-    /// 任务完成（或出错）。
+    /// Returns the fuzzed status mask. Any non-zero value means at least one
+    /// task completed or faulted since the previous read.
     pub fn handle_interrupt0(&mut self) -> u32 {
         self.base[0].handle_interrupt()
     }
 
-    /// 为一个核心创建轻量级的 `Send + Sync` 中断处理程序。
+    /// Create a lightweight `Send + Sync` IRQ handler for one core.
     ///
-    /// 当平台 IRQ 框架需要一个可以从中断上下文调用的对象而不持有
-    /// `&mut Rknpu` 时，这很有用。
+    /// This is useful when the platform IRQ framework needs a callable object
+    /// that can run in interrupt context without borrowing `&mut Rknpu`.
     pub fn new_irq_handler(&self, core_idx: usize) -> RknpuIrqHandler {
         RknpuIrqHandler(self.base[core_idx].clone())
     }
 }
 
-/// 单个 NPU 核心的轻量级中断处理程序。
+/// Lightweight interrupt handler for one NPU core.
 ///
-/// 从 [`Rknpu`] 克隆，可以安全地从 IRQ 上下文调用。
-/// 仅读取 INTERRUPT_STATUS 并写入 INTERRUPT_CLEAR —
-/// 没有内存分配或阻塞。
+/// Cloned from [`Rknpu`] and safe to call from IRQ context. It only reads and
+/// clears interrupt state; it does not allocate memory or block.
 pub struct RknpuIrqHandler(RknpuCore);
 
 unsafe impl Send for RknpuIrqHandler {}
 unsafe impl Sync for RknpuIrqHandler {}
 
 impl RknpuIrqHandler {
-    /// 读取并清除挂起的中断。返回模糊状态。
+    /// Read and clear pending interrupts, returning the fuzzed status.
     pub fn handle(&self) -> u32 {
         self.0.handle_interrupt()
     }

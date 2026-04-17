@@ -41,10 +41,10 @@ fn probe(info: FdtInfo<'_>, plat_dev: PlatformDevice) -> Result<(), OnProbeError
 
     let clock = info.node.clocks().collect::<Vec<_>>();
 
-    info!("perparing to init emmc with clock");
+    warn!("perparing to init emmc with clock");
 
     for clk in &clock {
-        info!(
+        warn!(
             "clock: {}, select {}, name: {:?}, rate: {:?}",
             clk.node.name(),
             clk.select,
@@ -84,11 +84,11 @@ fn probe(info: FdtInfo<'_>, plat_dev: PlatformDevice) -> Result<(), OnProbeError
             base_reg.address, mmio_size
         ))
     })?;
-    info!("eMMC card info: {:#?}", info);
+    warn!("eMMC card info: {:#?}", info);
 
     let dev = BlockDivce { dev: Some(emmc) };
     plat_dev.register(Block::new(dev));
-    debug!("virtio block device registered successfully");
+    warn!("virtio block device registered successfully");
     Ok(())
 }
 

@@ -149,9 +149,7 @@ pub fn sys_mknodat(dirfd: i32, path: *const c_char, mode: u32, dev: u64) -> Resu
                 // Symlinks require a target, but we don't have one in mknodat
                 Err(AxError::InvalidInput)
             }
-            NodeType::Unknown => {
-                Err(AxError::InvalidInput)
-            }
+            NodeType::Unknown => Err(AxError::InvalidInput),
         }
     })
 }

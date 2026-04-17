@@ -237,8 +237,11 @@ double benchmark_int8_npu(int fd, int m, int k, int n, int iterations) {
         .core_mask = 1,
         .fence_fd = -1,
         .subcore_task = {
-            { .task_start = 0, .task_number = 1 },
-            { 1, 0 }, { 2, 0 }, { 0, 0 }, { 0, 0 }
+        { .task_start = 0, .task_number = 1 },
+        { .task_start = 1, .task_number = 0 },
+        { .task_start = 2, .task_number = 0 },
+        { .task_start = 0, .task_number = 0 },
+        { .task_start = 0, .task_number = 0 }
         },
     };
 

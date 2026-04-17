@@ -32,7 +32,6 @@ typedef struct libnpu_submit {
 
 void *dma_malloc(size_t size, uint64_t *dma_addr);
 int dma_free(void *ptr);
-int npu_dump_status(const libnpu_submit *submit);
 
 #ifdef __cplusplus
 }

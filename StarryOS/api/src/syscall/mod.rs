@@ -15,7 +15,6 @@ mod time;
 const SYS_DMA_MALLOC: usize = 400;
 const SYS_DMA_FREE: usize = 401;
 const SYS_RESOLVE_NPU: usize = 402;
-const SYS_DUMP_NPU_STATUS: usize = 403;
 
 use axerrno::{AxError, LinuxError};
 use axhal::uspace::UserContext;
@@ -46,13 +45,6 @@ pub fn handle_syscall(uctx: &mut UserContext) {
     if raw_sysno == SYS_RESOLVE_NPU {
         trace!("Syscall SYS_RESOLVE_NPU");
         let result = sys_resolve_npu(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _);
-        uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).code() as _) as _);
-        return;
-    }
-
-    if raw_sysno == SYS_DUMP_NPU_STATUS {
-        trace!("Syscall SYS_DUMP_NPU_STATUS");
-        let result = sys_dump_npu_status(uctx.arg0() as _);
         uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).code() as _) as _);
         return;
     }

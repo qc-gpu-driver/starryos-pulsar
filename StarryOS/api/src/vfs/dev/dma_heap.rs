@@ -40,7 +40,7 @@ impl DeviceOps for DmaHeapSystem {
 
     fn ioctl(&self, cmd: u32, arg: usize) -> VfsResult<usize> {
         warn!("dma_heap: ioctl called cmd={:#x}, arg={:#x}", cmd, arg);
-        
+
         // Handle common DMA heap ioctls
         match cmd {
             // For now, we just return success for all ioctls and zero the first u32

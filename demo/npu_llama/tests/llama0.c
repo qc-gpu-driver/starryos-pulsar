@@ -106,9 +106,27 @@ typedef struct {
 
 #define MAX_BUFFER_POOL_SIZE 12
 #define NPU_MAX_CORES 3
+#define NPU_MAX_M_PER_TASK 544
+#define NPU_MATMUL_OUTPUT_LANES 16
+/*
+ * The FFN split path (w1/w2/w3 across 3 NPU cores) is still under board-side
+ * validation. Keep it disabled by default so llama uses the last known-good
+ * path while the split implementation is debugged separately.
+ */
+#define ENABLE_FFN_SPLIT_NPU 0
 
-/* 调试总开关：允许在现有可跑通路径上按阶段打印 NPU 状态。 */
-static int g_enable_npu_dump = 1;
+typedef struct {
+    int part_count;
+    int row_start[NPU_MAX_CORES];
+    int row_count[NPU_MAX_CORES];
+} NPURowSplitPlan;
+
+/*
+ * StarryOS current tree no longer exposes the legacy DumpStatus ioctl,
+ * so keep this disabled by default to avoid issuing unsupported commands
+ * during normal llama runs.
+ */
+static int g_enable_npu_dump = 0;
 
 /* 通过 dump ioctl 打印当前 submit/owner 视角下的 NPU 状态。 */
 static void maybe_dump_npu_status(int npu_fd, const char *stage, struct rknpu_submit *submit) {
@@ -157,6 +175,12 @@ typedef struct {
         NPUWeightCache *w1_cache;  // [n_layers]
         NPUWeightCache *w2_cache;  // [n_layers]
         NPUWeightCache *w3_cache;  // [n_layers]
+        NPUWeightCache (*w1_split_cache)[NPU_MAX_CORES];  // [n_layers][NPU_MAX_CORES]
+        NPUWeightCache (*w2_split_cache)[NPU_MAX_CORES];  // [n_layers][NPU_MAX_CORES]
+        NPUWeightCache (*w3_split_cache)[NPU_MAX_CORES];  // [n_layers][NPU_MAX_CORES]
+        NPURowSplitPlan w1_split_plan;
+        NPURowSplitPlan w2_split_plan;
+        NPURowSplitPlan w3_split_plan;
         NPUWeightCache *wcls_cache;
         int enabled;
     } weight_cache;
@@ -301,6 +325,83 @@ void free_weight_cache(int npu_fd, NPUWeightCache* cache) {
     }
     // NOTE: Do not free(cache) here because cache is usually part of an array
     // The array itself will be freed separately
+}
+
+/*
+ * Split one logical matmul output dimension into up to 3 row chunks.
+ * For d > 1 the NPU requires row counts to stay 4-aligned, so we split
+ * in units of 4 rows and keep the chunks balanced across the available cores.
+ */
+static int build_row_split_plan(int total_rows, NPURowSplitPlan* plan) {
+    memset(plan, 0, sizeof(*plan));
+    if (total_rows <= 0) {
+        return -1;
+    }
+    if (total_rows == 1) {
+        plan->part_count = 1;
+        plan->row_count[0] = 1;
+        return 0;
+    }
+    if ((total_rows % 4) != 0 || total_rows > NPU_MAX_M_PER_TASK * NPU_MAX_CORES) {
+        return -1;
+    }
+
+    int total_quads = total_rows / 4;
+    int part_count = total_quads < NPU_MAX_CORES ? total_quads : NPU_MAX_CORES;
+    int base_quads = total_quads / part_count;
+    int extra_quads = total_quads % part_count;
+    int row_start = 0;
+
+    plan->part_count = part_count;
+    for (int c = 0; c < part_count; c++) {
+        int row_count = (base_quads + (c < extra_quads ? 1 : 0)) * 4;
+        if (row_count <= 0 || row_count > NPU_MAX_M_PER_TASK) {
+            memset(plan, 0, sizeof(*plan));
+            return -1;
+        }
+        plan->row_start[c] = row_start;
+        plan->row_count[c] = row_count;
+        row_start += row_count;
+    }
+
+    return row_start == total_rows ? 0 : -1;
+}
+
+static int cache_split_weight_layers(
+    int npu_fd,
+    NPUWeightCache (*dst)[NPU_MAX_CORES],
+    int n_layers,
+    const NPURowSplitPlan* plan,
+    float* weights_base,
+    size_t layer_stride,
+    int cols
+) {
+    int cached = 0;
+
+    if (!dst || !plan || plan->part_count <= 0) {
+        return 0;
+    }
+
+    for (int l = 0; l < n_layers; l++) {
+        float* layer_base = weights_base + (size_t)l * layer_stride;
+        for (int c = 0; c < plan->part_count; c++) {
+            int row_start = plan->row_start[c];
+            int row_count = plan->row_count[c];
+            NPUWeightCache* split = create_weight_cache(
+                npu_fd,
+                layer_base + (size_t)row_start * cols,
+                row_count,
+                cols
+            );
+            if (split) {
+                dst[l][c] = *split;
+                free(split);
+                cached++;
+            }
+        }
+    }
+
+    return cached;
 }
 
 // OPTIMIZATION: Initialize larger buffer pool
@@ -450,6 +551,9 @@ void build_transformer(Transformer *t, char* checkpoint_path) {
     t->weight_cache.w1_cache = calloc(n_layers, sizeof(NPUWeightCache));
     t->weight_cache.w2_cache = calloc(n_layers, sizeof(NPUWeightCache));
     t->weight_cache.w3_cache = calloc(n_layers, sizeof(NPUWeightCache));
+    t->weight_cache.w1_split_cache = NULL;
+    t->weight_cache.w2_split_cache = NULL;
+    t->weight_cache.w3_split_cache = NULL;
     
     int cached_count = 0;
     int total_count = 0;
@@ -473,19 +577,63 @@ void build_transformer(Transformer *t, char* checkpoint_path) {
         if (wo) { t->weight_cache.wo_cache[l] = *wo; free(wo); cached_count++; }
         total_count++;
         
-        // FFN weights
+        total_count++;
+        total_count++;
+        total_count++;
+
         NPUWeightCache* w1 = create_weight_cache(t->npu_fd, t->weights.w1 + l*dim*hidden_dim, hidden_dim, dim);
         if (w1) { t->weight_cache.w1_cache[l] = *w1; free(w1); cached_count++; }
-        total_count++;
-        
+
         NPUWeightCache* w2 = create_weight_cache(t->npu_fd, t->weights.w2 + l*hidden_dim*dim, dim, hidden_dim);
         if (w2) { t->weight_cache.w2_cache[l] = *w2; free(w2); cached_count++; }
-        total_count++;
-        
+
         NPUWeightCache* w3 = create_weight_cache(t->npu_fd, t->weights.w3 + l*dim*hidden_dim, hidden_dim, dim);
         if (w3) { t->weight_cache.w3_cache[l] = *w3; free(w3); cached_count++; }
-        total_count++;
     }
+
+#if ENABLE_FFN_SPLIT_NPU
+    t->weight_cache.w1_split_cache = calloc(n_layers, sizeof(*t->weight_cache.w1_split_cache));
+    t->weight_cache.w2_split_cache = calloc(n_layers, sizeof(*t->weight_cache.w2_split_cache));
+    t->weight_cache.w3_split_cache = calloc(n_layers, sizeof(*t->weight_cache.w3_split_cache));
+
+    build_row_split_plan(hidden_dim, &t->weight_cache.w1_split_plan);
+    build_row_split_plan(dim, &t->weight_cache.w2_split_plan);
+    build_row_split_plan(hidden_dim, &t->weight_cache.w3_split_plan);
+
+    for (int l = 0; l < n_layers; l++) {
+        total_count += t->weight_cache.w1_split_plan.part_count.saturating_sub(1);
+        total_count += t->weight_cache.w2_split_plan.part_count.saturating_sub(1);
+        total_count += t->weight_cache.w3_split_plan.part_count.saturating_sub(1);
+    }
+
+    cached_count += cache_split_weight_layers(
+        t->npu_fd,
+        t->weight_cache.w1_split_cache,
+        n_layers,
+        &t->weight_cache.w1_split_plan,
+        t->weights.w1,
+        (size_t)dim * hidden_dim,
+        dim
+    );
+    cached_count += cache_split_weight_layers(
+        t->npu_fd,
+        t->weight_cache.w2_split_cache,
+        n_layers,
+        &t->weight_cache.w2_split_plan,
+        t->weights.w2,
+        (size_t)hidden_dim * dim,
+        hidden_dim
+    );
+    cached_count += cache_split_weight_layers(
+        t->npu_fd,
+        t->weight_cache.w3_split_cache,
+        n_layers,
+        &t->weight_cache.w3_split_plan,
+        t->weights.w3,
+        (size_t)dim * hidden_dim,
+        dim
+    );
+#endif
     
     // Classifier weights
     t->weight_cache.wcls_cache = calloc(1, sizeof(NPUWeightCache));
@@ -503,7 +651,7 @@ void build_transformer(Transformer *t, char* checkpoint_path) {
     t->npu_fallback = 0;
     
     fprintf(stderr, "NPU initialized successfully:\n");
-    fprintf(stderr, "  - Cached %d/%d weight matrices (%.1f%%)\n", 
+    fprintf(stderr, "  - Cached %d/%d NPU weight entries (%.1f%%)\n", 
             cached_count, total_count, 100.0 * cached_count / total_count);
     fprintf(stderr, "  - Buffer pool: %d buffers\n", MAX_BUFFER_POOL_SIZE);
 #endif
@@ -530,6 +678,24 @@ void free_transformer(Transformer* t) {
                     free_weight_cache(t->npu_fd, &t->weight_cache.w2_cache[l]);
                 if (t->weight_cache.w3_cache[l].is_cached)
                     free_weight_cache(t->npu_fd, &t->weight_cache.w3_cache[l]);
+                if (t->weight_cache.w1_split_cache) {
+                    for (int c = 0; c < t->weight_cache.w1_split_plan.part_count; c++) {
+                        if (t->weight_cache.w1_split_cache[l][c].is_cached)
+                            free_weight_cache(t->npu_fd, &t->weight_cache.w1_split_cache[l][c]);
+                    }
+                }
+                if (t->weight_cache.w2_split_cache) {
+                    for (int c = 0; c < t->weight_cache.w2_split_plan.part_count; c++) {
+                        if (t->weight_cache.w2_split_cache[l][c].is_cached)
+                            free_weight_cache(t->npu_fd, &t->weight_cache.w2_split_cache[l][c]);
+                    }
+                }
+                if (t->weight_cache.w3_split_cache) {
+                    for (int c = 0; c < t->weight_cache.w3_split_plan.part_count; c++) {
+                        if (t->weight_cache.w3_split_cache[l][c].is_cached)
+                            free_weight_cache(t->npu_fd, &t->weight_cache.w3_split_cache[l][c]);
+                    }
+                }
             }
 
             // wcls_cache is separately allocated, so handle it specially
@@ -553,6 +719,9 @@ void free_transformer(Transformer* t) {
             free(t->weight_cache.w1_cache);
             free(t->weight_cache.w2_cache);
             free(t->weight_cache.w3_cache);
+            free(t->weight_cache.w1_split_cache);
+            free(t->weight_cache.w2_split_cache);
+            free(t->weight_cache.w3_split_cache);
         }
         
         // Free buffer pool
@@ -1039,6 +1208,183 @@ qkv_cleanup_error:
     return -1;
 }
 
+/*
+ * Run one logical matmul across up to 3 NPU cores by slicing the output rows.
+ * Each core executes an independent row chunk and the caller stitches the
+ * partial outputs back into one destination vector.
+ */
+int matmul_npu_split_cached(Transformer* t, float* xout, float* x,
+                            NPUWeightCache (*split_caches)[NPU_MAX_CORES],
+                            const NPURowSplitPlan* plan,
+                            int layer_idx, int n, int d) {
+    if (!split_caches || !plan || plan->part_count <= 0) {
+        return -1;
+    }
+
+    int covered_rows = 0;
+    for (int c = 0; c < plan->part_count; c++) {
+        covered_rows += plan->row_count[c];
+        if (!split_caches[layer_idx][c].is_cached) {
+            return -1;
+        }
+    }
+    if (covered_rows != d) {
+        return -1;
+    }
+    if (n % 32 != 0 || n > 4096) {
+        return -1;
+    }
+
+    int K = n;
+    int N = NPU_MATMUL_OUTPUT_LANES;
+    int K_padded = ((K + 31) / 32) * 32;
+
+    t->npu_calls += plan->part_count;
+
+    NPUBuffer* input_bufs[NPU_MAX_CORES] = {0};
+    NPUBuffer* weights_bufs[NPU_MAX_CORES] = {0};
+    NPUBuffer* output_bufs[NPU_MAX_CORES] = {0};
+    void* inputs[NPU_MAX_CORES] = {0};
+    void* weights[NPU_MAX_CORES] = {0};
+    void* outputs[NPU_MAX_CORES] = {0};
+    uint64_t input_dmas[NPU_MAX_CORES] = {0};
+    uint64_t weights_dmas[NPU_MAX_CORES] = {0};
+    uint64_t output_dmas[NPU_MAX_CORES] = {0};
+    int use_pool[NPU_MAX_CORES] = {0};
+
+    for (int c = 0; c < plan->part_count; c++) {
+        int M = plan->row_count[c];
+        size_t input_size = split_caches[layer_idx][c].size;
+        size_t weights_size = ((K_padded + 31) / 32) * 32 * N * sizeof(_Float16);
+        size_t output_size = (size_t)M * N * sizeof(float);
+
+        input_bufs[c] = get_buffer_from_pool(t, input_size);
+        weights_bufs[c] = get_buffer_from_pool(t, weights_size);
+        output_bufs[c] = get_buffer_from_pool(t, output_size);
+
+        if (!input_bufs[c] || !weights_bufs[c] || !output_bufs[c]) {
+            for (int j = 0; j <= c; j++) {
+                if (input_bufs[j]) release_buffer_to_pool(input_bufs[j]);
+                if (weights_bufs[j]) release_buffer_to_pool(weights_bufs[j]);
+                if (output_bufs[j]) release_buffer_to_pool(output_bufs[j]);
+            }
+            t->npu_fallback += plan->part_count;
+            return -1;
+        }
+
+        inputs[c] = input_bufs[c]->data;
+        weights[c] = weights_bufs[c]->data;
+        outputs[c] = output_bufs[c]->data;
+        input_dmas[c] = input_bufs[c]->dma;
+        weights_dmas[c] = weights_bufs[c]->dma;
+        output_dmas[c] = output_bufs[c]->dma;
+        use_pool[c] = 1;
+    }
+
+    for (int c = 0; c < plan->part_count; c++) {
+        int M = plan->row_count[c];
+        size_t weights_size = ((K_padded + 31) / 32) * 32 * N * sizeof(_Float16);
+
+        memcpy(inputs[c], split_caches[layer_idx][c].data, split_caches[layer_idx][c].size);
+
+        _Float16* weights_fp16 = weights[c];
+        for (int n_idx = 1; n_idx <= N; n_idx++) {
+            for (int k = 1; k <= K; k++) {
+                int src_idx = k - 1;
+                int dst_idx = weight_fp16(K, n_idx, k);
+                if (src_idx < K && dst_idx >= 0 && dst_idx < (int)(weights_size / sizeof(_Float16))) {
+                    weights_fp16[dst_idx] = (_Float16)x[src_idx];
+                } else {
+                    goto split_cleanup_error;
+                }
+            }
+        }
+
+        matmul_params_t params;
+        params.m = M;
+        params.k = K;
+        params.n = N;
+        params.input_dma = input_dmas[c];
+        params.weights_dma = weights_dmas[c];
+        params.output_dma = output_dmas[c];
+        params.tasks = (uint64_t*)&t->npu_regs[c];
+        params.fp32tofp16 = 0;
+
+        if (gen_matmul_fp16(&params) != 0) {
+            goto split_cleanup_error;
+        }
+
+        memcpy(t->regcmd[c], t->npu_regs[c], sizeof(t->npu_regs[c]));
+
+        t->tasks[c].flags = 0;
+        t->tasks[c].op_idx = 0;
+        t->tasks[c].enable_mask = 0xd;
+        t->tasks[c].int_mask = 0x300;
+        t->tasks[c].int_clear = 0x1ffff;
+        t->tasks[c].int_status = 0;
+        t->tasks[c].regcfg_amount = sizeof(t->npu_regs[0]) / sizeof(uint64_t) - (RKNPU_PC_DATA_EXTRA_AMOUNT + 4);
+        t->tasks[c].regcfg_offset = 0;
+        t->tasks[c].regcmd_addr = t->regcmd_dma[c];
+    }
+
+    struct rknpu_submit submit = {
+        .flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG,
+        .timeout = 6000,
+        .task_start = 0,
+        .task_number = (uint32_t)plan->part_count,
+        .task_counter = 0,
+        .priority = 0,
+        .task_obj_addr = t->tasks_obj,
+        .regcfg_obj_addr = 0,
+        .task_base_addr = 0,
+        .user_data = 0,
+        .core_mask = (1u << plan->part_count) - 1u,
+        .fence_fd = -1,
+    };
+    for (int c = 0; c < plan->part_count; c++) {
+        submit.subcore_task[c].task_start = (uint32_t)c;
+        submit.subcore_task[c].task_number = 1;
+    }
+
+    if (ioctl(t->npu_fd, DRM_IOCTL_RKNPU_SUBMIT, &submit) < 0) {
+        goto split_cleanup_error;
+    }
+
+    for (int c = 0; c < plan->part_count; c++) {
+        int M = plan->row_count[c];
+        int row_start = plan->row_start[c];
+        float* output_data = (float*)outputs[c];
+        for (int m = 1; m <= M; m++) {
+            int dst_idx = row_start + (m - 1);
+            int src_idx = feature_data(N, M, 1, 4, 1, m, 1);
+            if (dst_idx < d && src_idx >= 0 && src_idx < M * N) {
+                xout[dst_idx] = output_data[src_idx];
+            } else {
+                goto split_cleanup_error;
+            }
+        }
+    }
+
+    for (int c = 0; c < plan->part_count; c++) {
+        release_buffer_to_pool(input_bufs[c]);
+        release_buffer_to_pool(weights_bufs[c]);
+        release_buffer_to_pool(output_bufs[c]);
+    }
+    t->npu_success += plan->part_count;
+    return 0;
+
+split_cleanup_error:
+    for (int c = 0; c < plan->part_count; c++) {
+        if (use_pool[c]) {
+            if (input_bufs[c]) release_buffer_to_pool(input_bufs[c]);
+            if (weights_bufs[c]) release_buffer_to_pool(weights_bufs[c]);
+            if (output_bufs[c]) release_buffer_to_pool(output_bufs[c]);
+        }
+    }
+    t->npu_fallback += plan->part_count;
+    return -1;
+}
+
 // Wrapper function for matmul with automatic cache lookup
 int matmul_npu_with_cache(Transformer* t, float* xout, float* x, float* w, 
                           int n, int d, int layer_idx, const char* weight_type) {
@@ -1058,10 +1404,37 @@ int matmul_npu_with_cache(Transformer* t, float* xout, float* x, float* w,
     } else if (strcmp(weight_type, "wo") == 0) {
         cache = &t->weight_cache.wo_cache[layer_idx];
     } else if (strcmp(weight_type, "w1") == 0) {
+        if (ENABLE_FFN_SPLIT_NPU
+            && t->weight_cache.w1_split_cache
+            && t->weight_cache.w1_split_plan.part_count > 0)
+        {
+            return matmul_npu_split_cached(
+                t, xout, x, t->weight_cache.w1_split_cache,
+                &t->weight_cache.w1_split_plan, layer_idx, n, d
+            );
+        }
         cache = &t->weight_cache.w1_cache[layer_idx];
     } else if (strcmp(weight_type, "w2") == 0) {
+        if (ENABLE_FFN_SPLIT_NPU
+            && t->weight_cache.w2_split_cache
+            && t->weight_cache.w2_split_plan.part_count > 0)
+        {
+            return matmul_npu_split_cached(
+                t, xout, x, t->weight_cache.w2_split_cache,
+                &t->weight_cache.w2_split_plan, layer_idx, n, d
+            );
+        }
         cache = &t->weight_cache.w2_cache[layer_idx];
     } else if (strcmp(weight_type, "w3") == 0) {
+        if (ENABLE_FFN_SPLIT_NPU
+            && t->weight_cache.w3_split_cache
+            && t->weight_cache.w3_split_plan.part_count > 0)
+        {
+            return matmul_npu_split_cached(
+                t, xout, x, t->weight_cache.w3_split_cache,
+                &t->weight_cache.w3_split_plan, layer_idx, n, d
+            );
+        }
         cache = &t->weight_cache.w3_cache[layer_idx];
     } else if (strcmp(weight_type, "wcls") == 0) {
         cache = t->weight_cache.wcls_cache;

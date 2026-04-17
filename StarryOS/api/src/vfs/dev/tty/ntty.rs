@@ -1,6 +1,6 @@
 use alloc::{boxed::Box, sync::Arc};
-use axhal::irq::register_irq_waker;
 
+use axhal::irq::register_irq_waker;
 use lazy_static::lazy_static;
 
 use super::Tty;

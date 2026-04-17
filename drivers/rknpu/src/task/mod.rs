@@ -1,29 +1,29 @@
-//! 高级任务提交类型。
+//! High-level task submission types.
 //!
-//! # 寄存器命令缓冲区
+//! # Register-command buffers
 //!
-//! NPU 的 PC 模块通过 DMA 读取 64 位**寄存器命令**（regcmds）缓冲区来工作。
-//! 每个 regcmd 由 `npu_op(block, value, reg)` 打包，并告诉 PC：
-//! "将 `value` 写入 `block` 上的 `reg`"。
+//! The NPU PC block works by DMA-reading a buffer of 64-bit register commands.
+//! Each regcmd is packed with `npu_op(block, value, reg)` and tells the PC
+//! block which register to write and which value to place there.
 //!
 //! ```text
 //!  63        48 47        16 15         0
 //!  ┌──────────┬─────────────┬───────────┐
-//!  │  opcode  │    value    │  register │   = 一个 u64 regcmd
+//!  │  opcode  │    value    │  register │   = one `u64` regcmd
 //!  │ (block)  │   (32-bit)  │  (offset) │
 //!  └──────────┴─────────────┴───────────┘
 //! ```
 //!
-//! 一个**任务**是一系列连续的 regcmds，为一个神经网络层配置整个
-//! CNA → MAC → DPU 流水线。多个任务在单个 DMA 缓冲区（`regcmd_all`）中
-//! 背靠背排列。
+//! One task is a contiguous range of regcmds that programs the full
+//! CNA -> MAC -> DPU pipeline for one neural-network layer. Several tasks are
+//! laid out back-to-back inside one DMA buffer.
 //!
-//! # 提交层次结构
+//! # Submission hierarchy
 //!
 //! ```text
-//!  Submit                  (拥有 DMA 缓冲区 + 操作列表)
-//!    └─ SubmitRef          (传递给寄存器代码的轻量级视图)
-//!         └─ SubmitBase    (核心索引、中断掩码、标志)
+//!  Submit                  (owns DMA buffer + operation list)
+//!    └─ SubmitRef          (lightweight view passed to register code)
+//!         └─ SubmitBase    (core index, interrupt mask, flags)
 //! ```
 
 use alloc::vec::Vec;
@@ -38,76 +38,71 @@ pub mod op;
 pub mod taskqueen;
 pub use taskqueen::*;
 
-/// 任务批次的共享参数 — 独立于实际的 regcmd 数据。
+/// Shared parameters for a batch of tasks, independent of the actual regcmd
+/// buffer.
 #[derive(Debug, Clone)]
 pub struct SubmitBase {
-    /// 执行模式标志（PC、BLOCK、PINGPONG 等）。
+    /// Execution-mode flags such as `PC`, `BLOCK`, or `PINGPONG`.
     pub flags: JobMode,
-    /// RknpuTask[] 描述符数组的 DMA 地址（用于 ioctl 路径）。
-    /// 使用高级 `Submit` API 时为零。
+    /// DMA address of the `RknpuTask[]` descriptor array on the ioctl path.
     pub task_base_addr: u32,
-    /// 要在哪个 NPU 核心上运行（0、1 或 2）。
+    /// Target NPU core index.
     pub core_idx: usize,
-    /// 要等待的中断位 — 设置为最后一个任务的完成掩码。
-    /// 例如 0x300 表示"等待 ping 和 pong 上的 DPU 完成"。
+    /// Interrupt mask to wait for after launch.
     pub int_mask: u32,
-    /// 启动前要写入 INTERRUPT_CLEAR 的位。
+    /// Bits written to `INTERRUPT_CLEAR` before launch.
     pub int_clear: u32,
-    /// 每个任务的 64 位 regcmd 字数（批次中所有任务相同）。
+    /// Number of 64-bit regcmd words per task.
     pub regcfg_amount: u32,
 }
 
-/// 提交批次的轻量级引用 — 不拥有 DMA 缓冲区。
-///
-/// 这是 [`RknpuCore::submit_pc`] 实际使用来编程 PC 的内容。
+/// Lightweight view of a submission batch that does not own DMA memory.
 #[derive(Debug, Clone)]
 pub struct SubmitRef {
+    /// Shared submission parameters.
     pub base: SubmitBase,
-    /// 此批次中有多少任务（层）。
+    /// Number of tasks or layers in this batch.
     pub task_number: usize,
-    /// regcmd 缓冲区的 DMA 地址（第一个任务命令的开始）。
+    /// DMA address of the first regcmd in the batch.
     pub regcmd_base_addr: u32,
 }
 
-/// 拥有 DMA 寄存器命令缓冲区和操作列表。
+/// Owned submission object with DMA-backed register commands and operations.
 ///
-/// 由高级 API 创建（例如用于裸机演示），而不是使用来自用户空间的
-/// 原始 `RknpuSubmit` 结构的 ioctl 路径。
+/// This type is built by higher-level Rust code, for example bare-metal demos,
+/// rather than by the raw ioctl path that starts from `RknpuSubmit`.
 ///
-/// # 构造流程
+/// Construction flow:
 ///
 /// ```text
-///  1. 调用者构建 Vec<Operation>（例如几个 MatMul 层）。
-///  2. Submit::new() 为所有 regcmds 分配一个大的 DMA 缓冲区。
-///  3. 每个 Operation::fill_regcmd() 写入其缓冲区切片。
-///  4. 刷新缓冲区（confirm_write_all），以便 NPU 可以 DMA 读取它。
-///  5. Rknpu::submit() 将其转换为 SubmitRef 并调用 submit_pc()。
+///  1. The caller builds `Vec<Operation>`.
+///  2. `Submit::new()` allocates one large DMA buffer for all regcmds.
+///  3. Each `Operation::fill_regcmd()` fills its slice.
+///  4. The buffer is flushed so the NPU can DMA-read it.
+///  5. `Rknpu::submit()` converts it into `SubmitRef` and calls `submit_pc()`.
 /// ```
 pub struct Submit {
+    /// Shared submission parameters.
     pub base: SubmitBase,
-    /// 保存所有任务的所有寄存器命令的连续 DMA 缓冲区。
-    /// 布局：[task0_regcmds | task1_regcmds | ... | taskN_regcmds]
+    /// Contiguous DMA buffer containing all task regcmd streams.
     pub regcmd_all: DVec<u64>,
-    /// 操作对象（每个任务/层一个）。
+    /// Operation objects, one per task or layer.
     pub tasks: Vec<Operation>,
 }
 
 impl Submit {
-    /// 从操作列表构建提交。
-    ///
-    /// 这会分配 DMA regcmd 缓冲区，调用每个操作的 `fill_regcmd`
-    /// 来填充其切片，并刷新缓存。
+    /// Build a submission from an operation list.
     pub fn new(tasks: Vec<Operation>) -> Self {
         let base = SubmitBase {
             flags: JobMode::PC | JobMode::BLOCK | JobMode::PINGPONG,
             task_base_addr: 0,
             core_idx: 0,
-            int_mask: 0x300, // 等待 DPU 完成
+            int_mask: 0x300, // wait for DPU completion
             int_clear: 0x1ffff,
             regcfg_amount: tasks[0].reg_amount(),
         };
 
-        // 分配一个大的 DMA 缓冲区：regcfg_amount 字 × 任务数
+        // Allocate one large DMA buffer: regcfg_amount words times task count.
         let regcmd_all: DVec<u64> = DVec::zeros(
             u32::MAX as _,
             base.regcfg_amount as usize * tasks.len(),
@@ -118,10 +113,10 @@ impl Submit {
 
         assert!(
             regcmd_all.bus_addr() <= u32::MAX as u64,
-            "regcmd 基地址超过 u32"
+            "regcmd base address exceeds u32"
         );
 
-        // 用寄存器命令填充缓冲区的每个任务切片
+        // Fill each task slice with register commands.
         let amount = base.regcfg_amount as usize;
         for (i, task) in tasks.iter().enumerate() {
             let regcmd = unsafe {
@@ -129,7 +124,7 @@ impl Submit {
             };
             task.fill_regcmd(regcmd);
         }
-        // 刷新 CPU 缓存，以便 NPU 可以 DMA 读取命令
+        // Flush CPU cache so the NPU can DMA-read the commands.
         regcmd_all.confirm_write_all();
 
         Self {
@@ -139,7 +134,7 @@ impl Submit {
         }
     }
 
-    /// 创建用于传递给寄存器层的轻量级引用。
+    /// Create a lightweight reference view for the register layer.
     pub fn as_ref(&self) -> SubmitRef {
         SubmitRef {
             base: self.base.clone(),

@@ -14,7 +14,13 @@ spin = "0.10"
 thiserror = {version = "2.0", default-features = false}
 bitflags = "2"
 rknpu-regs = {path = "../rknpu-regs"}
-axtask = { path = "../../StarryOS/arceos/modules/axtask", features = ["task-ext"] }
+rdrive = "0.18"
+rockchip-pm = {git = "https://github.com/drivercraft/rockchip-pm.git"}
+rk3588-clk = {git = "https://github.com/drivercraft/rk3588-clk"}
+axklib = {git = "https://github.com/arceos-hypervisor/arceos", branch = "hypervisor"}
+axtask = {path = "../../StarryOS/arceos/modules/axtask"}
+
+
 
 [dev-dependencies]
 arm-scmi = {git = "https://github.com/drivercraft/arm-scmi"}

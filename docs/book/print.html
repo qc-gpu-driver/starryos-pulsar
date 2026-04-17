@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6c72c2f4.js";
+            window.path_to_searchindex_js = "searchindex-dbd96b5a.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-cbe36b10.js"></script>
+        <script src="toc-657283d7.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -184,7 +184,7 @@
 <strong>目标</strong>：将添加了npu驱动的starry编译拷贝到开发板验证探测</p>
 </blockquote>
 <h2 id="实际计划"><a class="header" href="#实际计划">实际计划</a></h2>
-<h2 id="第一周环境验证与基础初始化"><a class="header" href="#第一周环境验证与基础初始化">第一周：环境验证与基础初始化</a></h2>
+<h2 id="第一阶段环境验证与基础初始化"><a class="header" href="#第一阶段环境验证与基础初始化">第一阶段：环境验证与基础初始化</a></h2>
 <h3 id="1-理论与环境准备"><a class="header" href="#1-理论与环境准备">1. 理论与环境准备</a></h3>
 <ul>
 <li><input disabled="" type="checkbox" checked=""> <strong>阅读手册与 Demo</strong>
@@ -224,123 +224,23 @@
 </ul>
 </li>
 </ul>
-<h3 id="2-驱动框架搭建-在starryos主线上完成"><a class="header" href="#2-驱动框架搭建-在starryos主线上完成">2. 驱动框架搭建 (在StarryOS主线上完成)</a></h3>
-<ul>
-<li><input disabled="" type="checkbox" checked=""> <strong>创建模块骨架</strong>
-<ul>
-<li><input disabled="" type="checkbox" checked=""> 在StarryOS组织的<code>arceos</code> 仓库中创建 <code>rknpu</code> 独立模块。</li>
-<li><input disabled="" type="checkbox" checked=""> 配置 <code>Cargo.toml</code> 依赖。</li>
-</ul>
-</li>
-<li><input disabled="" type="checkbox" checked=""> <strong>NPU探测</strong>
-<ul>
-<li><input disabled="" type="checkbox" checked=""> 实现 FDT (设备树) 解析，获取 NPU 寄存器基地址和中断号。</li>
-</ul>
-</li>
-<li><input disabled="" type="checkbox"> <strong>电源域管理 (Power Domain)</strong>
-<ul>
-<li><input disabled="" type="checkbox"> 对接 PMU 驱动，按顺序开启 NPU 电源域：
-<ul>
-<li><input disabled="" type="checkbox"> <code>NPUTOP</code></li>
-<li><input disabled="" type="checkbox"> <code>NPU0</code> (Core 0)</li>
-<li><input disabled="" type="checkbox"> <code>NPU1</code> (Core 1)</li>
-<li><input disabled="" type="checkbox"> <code>NPU2</code> (Core 2)</li>
-</ul>
-</li>
-</ul>
-</li>
-</ul>
-<h3 id="3-用户态接口适配-drm"><a class="header" href="#3-用户态接口适配-drm">3. 用户态接口适配 (DRM)</a></h3>
-<ul>
-<li><input disabled="" type="checkbox"> <strong>DRM 框架（StarryOS 主线）</strong>
-<ul>
-<li><input disabled="" type="checkbox" checked=""> <strong>DRM ioctl 基础解析</strong>
-<ul>
-<li><input disabled="" type="checkbox" checked=""> 实现 ioctl 编码解析：<code>ioctl_nr</code> / <code>is_driver_ioctl</code> / <code>io_size</code></li>
-</ul>
-</li>
-<li><input disabled="" type="checkbox"> <strong>设备节点与基础握手</strong>
-<ul>
-<li><input disabled="" type="checkbox"> <code>/dev/dri/card0</code>：实现 <code>DRM_IOCTL_VERSION</code>，返回 Rockchip 相关信息以通过初始化探测</li>
-<li><input disabled="" type="checkbox"> <code>/dev/dri/card1</code>：实现 <code>DRM_IOCTL_VERSION</code>，driver name 为 <code>rknpu</code></li>
-</ul>
-</li>
-<li><input disabled="" type="checkbox"> <strong>RKNPU driver ioctls（初期基于闭源库验证成果）</strong>
-<ul>
-<li><input disabled="" type="checkbox"> <code>DRM_IOCTL_RKNPU_MEM_CREATE</code>：返回 handle + dma_addr（设备可访问地址）</li>
-<li><input disabled="" type="checkbox"> <code>DRM_IOCTL_RKNPU_MEM_MAP</code>：返回可用于 <code>mmap</code> 的 offset</li>
-<li><input disabled="" type="checkbox"> <code>mmap</code>：根据 offset 找回 handle，并映射出可读写的用户态地址</li>
-<li><input disabled="" type="checkbox"> <code>DRM_IOCTL_RKNPU_SUBMIT</code>：最小可用的同步提交（先跑通）</li>
-<li><input disabled="" type="checkbox"> <code>DRM_IOCTL_RKNPU_MEM_DESTROY</code>：释放 handle 对应的内存对象（避免泄漏）</li>
-<li><input disabled="" type="checkbox"> <code>DRM_IOCTL_RKNPU_MEM_SYNC</code>：实现 cache sync 语义（至少对常用 flags 生效）</li>
-<li><input disabled="" type="checkbox"> <code>DRM_IOCTL_RKNPU_ACTION</code>：实现最小集合（GetDrvVersion/GetHwVersion/ActReset/GetIommuEn）</li>
-</ul>
-</li>
-<li><input disabled="" type="checkbox"> <strong>基于逆向成果编写纯驱动（内核态自测），再次验证上述成果</strong>
-<ul>
-<li><input disabled="" type="checkbox"> <strong>目标</strong>：不靠 <code>librknnrt.so</code>，自己在内核里“拼出一份 NPU 能执行的命令”，跑通一次计算</li>
-<li><input disabled="" type="checkbox"> <strong>待完成</strong></li>
-</ul>
-</li>
-</ul>
-</li>
-</ul>
-<hr>
-<h2 id="第二周核心逻辑与任务提交"><a class="header" href="#第二周核心逻辑与任务提交">第二周：核心逻辑与任务提交</a></h2>
-<h3 id="1-硬件抽象层-hal"><a class="header" href="#1-硬件抽象层-hal">1. 硬件抽象层 (HAL)</a></h3>
-<ul>
-<li><input disabled="" type="checkbox"> <strong>寄存器定义</strong>
-<ul>
-<li><input disabled="" type="checkbox"> 封装 NPU 控制寄存器 (PC_DATA, PC_TASK_CONTROL 等)。</li>
-<li><input disabled="" type="checkbox"> 封装中断状态寄存器 (INT_STATUS, INT_CLEAR)。</li>
-</ul>
-</li>
-<li><input disabled="" type="checkbox"> <strong>低级操作封装</strong>
-<ul>
-<li><input disabled="" type="checkbox"> 实现 <code>npu_reset()</code> (软复位)。</li>
-<li><input disabled="" type="checkbox"> 实现 <code>npu_start()</code> (启动计算)。</li>
-</ul>
-</li>
-</ul>
-<h3 id="2-任务调度逻辑"><a class="header" href="#2-任务调度逻辑">2. 任务调度逻辑</a></h3>
-<ul>
-<li><input disabled="" type="checkbox"> <strong>IOCTL 接口对接</strong>
-<ul>
-<li><input disabled="" type="checkbox"> 在 <code>StarryOS</code> 中处理来自 <code>card1</code> 的 IOCTL 请求。</li>
-<li><input disabled="" type="checkbox"> 解析用户态传递的 <code>RKNPU_SUBMIT</code> 结构体。</li>
-</ul>
-</li>
-<li><input disabled="" type="checkbox"> <strong>任务提交 (Job Submission)</strong>
-<ul>
-<li><input disabled="" type="checkbox"> 申请内核 DMA 内存存放 Command Buffer。</li>
-<li><input disabled="" type="checkbox"> 将用户态指令流写入硬件寄存器。</li>
-<li><input disabled="" type="checkbox"> 触发 NPU 硬件运行。</li>
-<li><input disabled="" type="checkbox"> 任务完成判定：中断状态位/完成标志的明确化（文档与代码一致）</li>
-<li><input disabled="" type="checkbox"> 超时与异常路径：可观测日志 + 合理错误码</li>
-<li><input disabled="" type="checkbox"> 多核最小策略：至少支持 core0/core1/core2 单核提交与轮转</li>
-</ul>
-</li>
-</ul>
-<hr>
-<h2 id="第三阶段异步推理支持具体完成点待完成"><a class="header" href="#第三阶段异步推理支持具体完成点待完成">第三阶段：异步推理支持（具体完成点待完成）</a></h2>
+<h2 id="第二阶段异步推理支持"><a class="header" href="#第二阶段异步推理支持">第二阶段：异步推理支持</a></h2>
 <p><strong>目标</strong>：将当前同步阻塞轮询的任务提交改为中断驱动的异步模式，提交任务后 CPU 不再空转等待，NPU 完成后通过中断通知。</p>
-<h3 id="难点分析"><a class="header" href="#难点分析">难点分析</a></h3>
+<h3 id="实现情况"><a class="header" href="#实现情况">实现情况</a></h3>
 <ul>
-<li><strong>中断处理</strong> — 当前 <code>submit_one()</code> 提交后死循环轮询 <code>interrupt_status</code> 寄存器等待完成。改为中断驱动需要注册 SPI 110/111/112 中断 handler，在中断上下文中唤醒等待的任务，涉及 ArceOS 的中断子系统对接</li>
-<li><strong>异步通知机制</strong> — 用户态需要一种方式知道推理完成。Linux 用 DMA Fence + <code>poll()</code>/<code>eventfd</code>，StarryOS 需要实现类似机制或简化版本（如 fence fd）</li>
-<li><strong>并发安全</strong> — 异步模式下多个任务可能同时在不同核心上执行，<code>Rknpu</code> 结构体的 <code>&amp;mut self</code> 独占访问模型不再适用，需要细粒度锁或 per-core 的状态管理</li>
-<li><strong>超时与错误恢复</strong> — 异步模式下任务超时不能简单 return error，需要 watchdog 定时器 + NPU 软复位的恢复路径</li>
+<li><input disabled="" type="checkbox" checked=""> <strong>中断处理</strong> — 实现 IRQ 驱动模式，CPU 通过 WFI 指令进入低功耗等待，NPU 完成后触发中断唤醒 CPU</li>
+<li><input disabled="" type="checkbox" checked=""> <strong>异步等待机制</strong> — 实现 <code>wait_all_npucore</code> 函数，支持多核心并行等待，每个核心独立触发中断</li>
+<li><input disabled="" type="checkbox" checked=""> <strong>并发安全</strong> — 每个核心维护独立的 <code>irq_status</code> 原子变量，避免多核并发访问冲突</li>
+<li><input disabled="" type="checkbox" checked=""> <strong>超时与错误恢复</strong> — 实现中断状态检查和错误传播机制，异常时正确上报错误码</li>
 </ul>
 <hr>
-<h2 id="第四阶段多-ai-模型并发运行具体完成点待完成"><a class="header" href="#第四阶段多-ai-模型并发运行具体完成点待完成">第四阶段：多 AI 模型并发运行（具体完成点待完成）</a></h2>
-<p><strong>目标</strong>：支持多个 AI 模型同时在 NPU 上推理，不同模型可分配到不同核心并行执行，互不干扰。</p>
-<h3 id="难点分析-1"><a class="header" href="#难点分析-1">难点分析</a></h3>
+<h2 id="第三阶段npu多任务并发运行"><a class="header" href="#第三阶段npu多任务并发运行">第三阶段：NPU多任务并发运行</a></h2>
+<p><strong>目标</strong>：支持多个NPU计算任务同时在NPU多核上进行</p>
+<h3 id="实现情况-1"><a class="header" href="#实现情况-1">实现情况</a></h3>
 <ul>
-<li><strong>硬件资源隔离</strong> — 3 个 NPU 核心的 PC/CORE/CNA 等寄存器是 per-core 独立的，但 GLOBAL 寄存器和 SRAM 是共享的。两个模型同时修改 GLOBAL 配置会冲突，需要确认哪些寄存器必须互斥访问（TRM 文档不全，需要实验验证）</li>
-<li><strong>GEM 内存隔离</strong> — 当前 <code>GemPool</code> 是全局单实例，所有模型共享同一个 handle 空间和 DMA buffer 池。多模型需要 per-context 的 GEM 表，避免一个模型误操作另一个模型的内存。<code>comfirm_write_all</code> / <code>prepare_read_all</code> 会刷全部 buffer，多模型下会误刷</li>
-<li><strong>核心分配策略</strong> — 大模型用多核、小模型用单核？固定分配还是动态调度？NPU 硬件不支持抢占，只能等当前 batch 完成才能切换，策略设计直接影响吞吐和延迟</li>
-<li><strong>用户态 session 管理</strong> — 每个 <code>open("/dev/dri/renderD128")</code> 需要创建独立 session，ioctl 根据 session 路由到对应的 GEM 表和任务队列，<code>rknn_run</code> 变为非阻塞返回 fence fd</li>
-<li><strong>IOMMU 支持</strong> — 多模型并发时，不同模型的 DMA 地址空间需要隔离，否则一个模型可以通过构造 DMA 地址读写另一个模型的数据，IOMMU/SMMU 是硬隔离的前提</li>
+<li><input disabled="" type="checkbox" checked=""> <strong>硬件资源隔离</strong> — 验证 3 个 NPU 核心的 PC/CORE/CNA 等寄存器 per-core 独立，GLOBAL 寄存器通过 <code>core_idx</code> 参数隔离</li>
+<li><input disabled="" type="checkbox" checked=""> <strong>GEM 内存隔离</strong> — 实现 per-core 的 regcmd 缓冲区分配，每个核心使用独立的 DMA 地址空间</li>
+<li><input disabled="" type="checkbox" checked=""> <strong>核心分配策略</strong> — 实现 <code>subcore_task</code> 机制，支持灵活的核心分配，QKV 三核并行、Wo 单核等混合调度</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="项目周报"><a class="header" href="#项目周报">项目周报</a></h1>
@@ -442,6 +342,173 @@ fn probe_rknpu(info: FdtInfo&lt;'_&gt;, dev: PlatformDevice) -&gt; Result&lt;(),
 </div>
 <p><strong>ioctl 分发机制</strong> — 驱动通过 <code>register_driver()</code> 注册自己的 ioctl handler，<code>dispatch_ioctl()</code> 根据命令编号自动分发到对应驱动。NPU 驱动只需注册一个回调函数即可处理私有 ioctl。</p>
 <hr><div style="break-before: page; page-break-before: always;"></div>
+<h1 id="第三周开发日志28-214"><a class="header" href="#第三周开发日志28-214">第三周开发日志（2.8-2.14）</a></h1>
+<h2 id="工作总结-2"><a class="header" href="#工作总结-2">工作总结</a></h2>
+<ul>
+<li><strong>修复 Axvisor 上 rsext4 文件系统导致的磁盘数据不一致问题</strong> — 客户机写文件后重启出现 “block is free” 错误，定位为 rsext4 缓存未同步，在写操作后增加 <code>sync_to_disk</code> 调用修复 <a href="https://github.com/arceos-hypervisor/axvisor/pull/368"><img src="https://img.shields.io/badge/PR-%23368_merged-8957e5?logo=github" alt="PR #368"></a></li>
+<li><strong>svd2rust 寄存器库重构</strong> — 基于 svd2rust 工具生成类型安全的寄存器访问库，重构 rknpu 驱动核心，减少手动操作寄存器的出错概率 <a href="../drivers/rknpu-regs"><img src="https://img.shields.io/badge/📦_rknpu--regs-寄存器库-blue" alt="rknpu-regs"></a> <a href="../drivers/rknpu"><img src="https://img.shields.io/badge/📦_rknpu-NPU驱动-blue" alt="rknpu"></a></li>
+<li><strong>辅助注释与文档</strong> — 利用 AI 为驱动代码添加详细注释，兼顾学习与开发效率</li>
+<li><strong>基于 WFI 的异步中断处理</strong> — 实现了 NPU 中断的异步等待机制</li>
+</ul>
+<hr>
+<h2 id="修复-axvisor-上-rsext4-文件系统磁盘数据不一致问题"><a class="header" href="#修复-axvisor-上-rsext4-文件系统磁盘数据不一致问题">修复 Axvisor 上 rsext4 文件系统磁盘数据不一致问题</a></h2>
+<blockquote>
+<p><a href="https://github.com/arceos-hypervisor/axvisor/pull/368"><img src="https://img.shields.io/badge/PR-%23368_merged-8957e5?logo=github" alt="PR rgba(51, 95, 136, 1)"></a></p>
+</blockquote>
+<h3 id="问题"><a class="header" href="#问题">问题</a></h3>
+<ol>
+<li>客户机执行文件写操作后重启，出现 <code>block is free</code>（双重释放，原来没有正确把<code>1</code>写回位图） （位图实际扫描使用的Block和超级块中的Block不一致）错误，磁盘数据损坏</li>
+<li>如果启动的是 Linux 客户机，Linux 在启动过程中会因文件系统完整性校验失败而无法启动</li>
+</ol>
+<h3 id="分析"><a class="header" href="#分析">分析</a></h3>
+<p>Linux 客户机的问题是由于 Axvisor 在启动客户机的最后时刻调用 <code>mount_virtual_fs</code> 时没有刷新文件系统，导致文件系统不一致。Linux 启动时进行文件系统完整性校验，发现不一致后拒绝启动，随后关机导致缓存丢失，最终造成文件系统损坏。</p>
+<p>根源在于 rsext4 为提升运行时性能设计了多级缓存机制，但 Axvisor 在集成 rsext4 时，没有在文件写操作后进行数据同步。如果客户机修改文件后立即关机，缓存仍停留在内存中，不可避免地导致磁盘数据不一致。</p>
+<h3 id="解决方案"><a class="header" href="#解决方案">解决方案</a></h3>
+<p>在 rsext4 的 <code>ext4fs.rs</code> 访问层中，对所有写操作调用 <code>sync_to_disk</code> 函数，确保数据及时同步到磁盘。虽然会带来一定的性能损失，但保证了文件系统的一致性。</p>
+<hr>
+<h2 id="开发板环境踩坑"><a class="header" href="#开发板环境踩坑">开发板环境踩坑</a></h2>
+<p>本周在板端遇到了一系列棘手的环境问题，花了不少时间排查：</p>
+<h3 id="u-boot-与启动链问题"><a class="header" href="#u-boot-与启动链问题">U-Boot 与启动链问题</a></h3>
+<ul>
+<li><strong>U-Boot 缺少网卡驱动</strong> — 板载 U-Boot 不支持网络传输，只能通过串口 <code>loady</code> 加载内核，debug 内核每次都要通过串口传内核很慢，每次修改都需要完整烧录StarryOS内核</li>
+<li><strong>SPI 残留环境变量</strong> — 从 OrangePi 官方 Ubuntu 镜像中提取干净的 U-Boot，制作 SPI 镜像刷入开发板。但刷完后发现 SPI 中残留了旧的 U-Boot 环境变量，导致启动失败，只能重新刷回 SPI 镜像</li>
+<li><strong>eMMC 与 SD 卡混淆</strong> — StarryOS 在开发板上扫描到板载 eMMC，但驱动却强制探测 SD 卡。起初误以为使用的是 SD 卡，经分析后确认实际使用的是板载 eMMC</li>
+</ul>
+<h3 id="后续-npu-驱动工作开发路线决策"><a class="header" href="#后续-npu-驱动工作开发路线决策"><strong>后续 NPU 驱动工作开发路线决策</strong></a></h3>
+<p>最初尝试将 NPU 驱动集成到 StarryOS 主线，但 HAL 层架构 <code>axhal</code> 与 <code>somehal</code> 存在冲突，RK3588 平台级代码集成涉及整个架构的大修改。为专注于 NPU 驱动核心功能开发，决定先在 StarryOS NPU 版本上开发，待主要功能完成后再移植回主线。</p>
+<hr>
+<h2 id="svd2rust-寄存器库重构"><a class="header" href="#svd2rust-寄存器库重构">svd2rust 寄存器库重构</a></h2>
+<p>基于 svd2rust 工具重构 rknpu 驱动的寄存器访问层。</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// 旧方式：手动偏移 + 裸指针
+let status = unsafe { ptr.add(0x20).read_volatile() };
+<span class="boring">}</span></code></pre>
+<h3 id="改进"><a class="header" href="#改进">改进</a></h3>
+<p>通过 svd2rust 从 SVD 描述文件生成类型安全的寄存器库 <code>rknpu-regs</code>，每个寄存器字段都有明确的类型和文档：</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>// 新方式：类型安全 + 自动补全 + 文档
+let status = core.pc().interrupt_status().read().bits();
+core.pc().interrupt_clear().write(|w| unsafe { w.bits(INT_CLEAR_ALL) });
+<span class="boring">}</span></code></pre>
+<h3 id="成果"><a class="header" href="#成果">成果</a></h3>
+<ul>
+<li>生成了完整的寄存器定义，覆盖 PC、CNA、CORE、DPU、PPU、DDMA 等所有功能块</li>
+<li><code>RknpuCore</code> 结构体封装了各功能块的访问方法，提供统一接口</li>
+<li>编译期类型检查杜绝了寄存器偏移量写错、位域宽度搞混等常见错误</li>
+</ul>
+<hr>
+<h2 id="ai-辅助注释"><a class="header" href="#ai-辅助注释">AI 辅助注释</a></h2>
+<p>利用 AI 为 <code>axnpu</code> 驱动代码添加了详细的中文注释(关键函数的调用流程和参数说明)</p>
+<p>既方便自己学习 NPU 硬件细节，也降低了后续开发和他人协作的门槛。</p>
+<hr>
+<h2 id="基于-wfi-的异步中断处理"><a class="header" href="#基于-wfi-的异步中断处理">基于 WFI 的异步中断处理</a></h2>
+<p>实现了 NPU 任务完成的异步等待机制：</p>
+<ul>
+<li>NPU 核心执行完任务后触发中断</li>
+<li>CPU 通过 WFI（Wait For Interrupt）指令进入低功耗等待状态</li>
+<li>中断到来时 CPU 被唤醒，读取中断状态寄存器，清除中断标志</li>
+<li>返回任务执行结果</li>
+</ul>
+<p>这为后续多核并发任务提交打下了基础——每个 NPU 核心可以独立触发中断，CPU 侧可以并行等待多个核心的完成通知。</p>
+<hr><div style="break-before: page; page-break-before: always;"></div>
+<h1 id="第五周开发日志222-228"><a class="header" href="#第五周开发日志222-228">第五周开发日志（2.22-2.28）</a></h1>
+<h2 id="工作总结-3"><a class="header" href="#工作总结-3">工作总结</a></h2>
+<ul>
+<li><strong>RK3588 NPU 三核并行矩阵乘法实现</strong> — 扩展 Transformer 结构体支持 3 套 regcmd 缓冲区，实现 <code>matmul_npu_3core_qkv</code> 函数，将 QKV 三个矩阵乘法并行提交到 3 个 NPU 核心，板端验证推理成功</li>
+<li><strong>驱动多核提交流程重构</strong> — 修改 <code>submit_ioctrl</code> 实现批量任务分配，支持一次 ioctl 向多个核心提交任务，新增 <code>wait_all_npucore</code> 并行等待机制</li>
+</ul>
+<hr>
+<h3 id="验证结果"><a class="header" href="#验证结果">验证结果</a></h3>
+<p>板端运行日志显示多核并行成功：</p>
+<pre><code>[261.640936] Total tasks to submit: 3, active cores: 3, max batch size: 4095
+[261.650710] Total tasks to submit: 1, active cores: 1, max batch size: 4095
+[262.295035] Total tasks to submit: 3, active cores: 3, max batch size: 4095
+...
+Once upon a time...
+</code></pre>
+<ul>
+<li><code>3 tasks, 3 cores</code> 表示 QKV 三核并行成功</li>
+<li><code>1 tasks, 1 core</code> 表示后续的 <code>wo</code> 矩阵乘法（单核）</li>
+<li>模型推理输出 “Once upon a time…” 验证结果正确</li>
+</ul>
+<hr>
+<h2 id="驱动多核提交流程重构"><a class="header" href="#驱动多核提交流程重构">驱动多核提交流程重构</a></h2>
+<h3 id="批量任务分配"><a class="header" href="#批量任务分配">批量任务分配</a></h3>
+<p>重构 <code>submit_ioctrl</code> 函数，支持将用户空间的任务数组自动分配到多个 NPU 核心：</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub fn submit_ioctrl(&amp;mut self, args: &amp;mut RknpuSubmit) -&gt; Result&lt;(), RknpuError&gt; {
+    // 1. 刷新缓存，确保 NPU 能看到 CPU 写入的数据
+    self.gem.comfirm_write_all()?;
+    
+    // 2. 提取活跃的核心任务
+    let active_subcore: Vec&lt;&amp;RknpuSubcoreTask&gt; = args.subcore_task.iter()
+        .filter(|s| s.task_number &gt; 0).collect();
+    
+    // 3. 批量提交到多个核心
+    while task_iter &lt; task_iter_end {
+        let task_batch = active_subcore.len().min(task_iter_end - task_iter);
+        let submit_tasks = unsafe { 
+            core::slice::from_raw_parts_mut(task_ptr.add(task_iter), task_batch) 
+        };
+        
+        // 并行启动每个核心的任务
+        for idx in 0..active_subcore.len().min(task_batch) {
+            self.base[idx].start_execute_one(idx, &amp;self.data, &amp;mut submit_tasks[idx], args)?;
+        }
+        
+        // 并行等待所有核心完成
+        self.wait_all_npucore(self.wait_fn, int_mask, submit_tasks)?;
+        task_iter += task_batch;
+    }
+    
+    // 4. 使缓存无效，确保 CPU 能读取 NPU 写入的结果
+    self.gem.prepare_read_all()?;
+    Ok(())
+}
+<span class="boring">}</span></code></pre>
+<h3 id="并行等待机制"><a class="header" href="#并行等待机制">并行等待机制</a></h3>
+<p>新增 <code>wait_all_npucore</code> 函数，实现多核心并行等待：</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>pub fn wait_all_npucore(&amp;self, normal_wait_fn: Option&lt;fn()&gt;, 
+                        int_mask: Vec&lt;u32&gt;, 
+                        submit_tasks: &amp;mut [RknpuTask]) -&gt; Result&lt;(), RknpuError&gt; {
+    let mut done: [bool; 3] = [false; 3];
+    
+    if let Some(wait) = normal_wait_fn {
+        // IRQ+WFI 模式：CPU 休眠等待中断
+        loop {
+            let status: Vec&lt;u32&gt; = self.base.iter()
+                .map(|core| core.irq_status.load(Ordering::Acquire)).collect();
+            
+            // 检查每个核心的完成状态
+            for idx in 0..submit_tasks.len() {
+                if status[idx] &amp; int_mask[idx] &gt; 0 {
+                    self.base[idx].clean_interrupts();
+                    self.base[idx].irq_status.store(0, Ordering::Release);
+                    submit_tasks[idx].int_status = int_mask[idx] &amp; status[idx];
+                    done[idx] = true;
+                }
+            }
+            
+            // 所有核心都完成则退出
+            if done[..submit_tasks.len()].iter().filter(|&amp;d| !d).count() == 0 {
+                break;
+            }
+            
+            // CPU 进入低功耗等待
+            (wait)();
+        }
+    } else {
+        panic!("[NPU] busy-poll mode not implemented for multi-core wait");
+    }
+    Ok(())
+}
+<span class="boring">}</span></code></pre>
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="rk3588-rknpu-开发文档"><a class="header" href="#rk3588-rknpu-开发文档">RK3588 RKNPU 开发文档</a></h1>
 <p>本文档基于 RockChip官方开源仓库和 StarryOS 仓库中对 RK3588 NPU 运行时库（闭源 <code>librknnrt.so</code>）及内核侧 RKNPU DRM 驱动的逆向与复现成果，整理为三个核心章节：</p>
 <h2 id="文档结构"><a class="header" href="#文档结构">文档结构</a></h2>
@@ -472,6 +539,12 @@ fn probe_rknpu(info: FdtInfo&lt;'_&gt;, dev: PlatformDevice) -&gt; Result&lt;(),
 <td><a href="documents/submit-flow.html"><strong>任务提交流程</strong></a></td>
 <td>从用户态提交到硬件执行完成的完整时序逻辑，包含状态机和各种失败路径</td>
 <td>查询job生命周期</td>
+</tr>
+
+<tr>
+<td><a href="#当前提交-irq-边界快照恢复系统"><strong>当前提交-IRQ 边界快照恢复系统</strong></a></td>
+<td>总结 step-submit、owner 切换、IRQ 边界快照/写坏/恢复/校验，以及相关 struct 的职责</td>
+<td>整理当前实验实现、查数据结构分工、回顾抢占边界语义</td>
 </tr>
 
 </table>
@@ -3835,6 +3908,8 @@ fn probe_rknpu(info: FdtInfo&lt;'_&gt;, dev: PlatformDevice) -&gt; Result&lt;(),
 </li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="当前提交-irq-边界快照恢复系统"><a class="header" href="#当前提交-irq-边界快照恢复系统">当前提交-IRQ 边界快照恢复系统</a></h1>
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="rknn-用户库手册"><a class="header" href="#rknn-用户库手册">RKNN 用户库手册</a></h1>
 <h2 id="概述"><a class="header" href="#概述">概述</a></h2>
 <p><code>librknnrt.so</code> 是 Rockchip 提供的<strong>闭源</strong> NPU 运行时库，负责将神经网络模型编译为硬件命令流并提交给内核驱动执行。它是用户态与 NPU 硬件之间的桥梁。</p>
@@ -5780,22 +5855,6 @@ NPU 输出（NC1HWC2, INT8/FP16）
         <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
         <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
 
-        <!-- Livereload script (if served using the cli tool) -->
-        <script>
-            const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsAddress = wsProtocol + "//" + location.host + "/" + "__livereload";
-            const socket = new WebSocket(wsAddress);
-            socket.onmessage = function (event) {
-                if (event.data === "reload") {
-                    socket.close();
-                    location.reload();
-                }
-            };
-
-            window.onbeforeunload = function() {
-                socket.close();
-            }
-        </script>
 
 
         <script>
