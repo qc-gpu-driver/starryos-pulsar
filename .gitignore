@@ -9,6 +9,6 @@ npu-state-machine-context.md
 .gitnexus
 AGENTS.md
 CLAUDE.md
-.claude/
+.claude/*
 !.claude/skills/
 .humanize/
