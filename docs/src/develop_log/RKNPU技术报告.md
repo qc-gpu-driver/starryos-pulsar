@@ -15,6 +15,7 @@
 5. 中断与 completion 回收：IRQ handler 负责读取硬件完成状态，调度器再根据 core 绑定关系把 completion 还原到具体任务。
 6. 多核调度：在一个 submit 中按 lane 把任务切到不同 core，同时支持多个 submit 进入队列等待。
 
+这项工作的意义主要有两点。第一，它补齐了国产 SoC NPU 在自研 OS 下的驱动基础能力。第二，它给后续推理优化、runtime 接入、benchmark 对比和长时间稳定性测试提供了一个可控的实验平台。
 
 ## 二、本轮二次开发重点
 
@@ -69,8 +70,9 @@ RK3588 的 RKNPU 不是单个执行核心，而是三个可以并行工作的 NP
 1. 用类型化寄存器接口替代裸地址和 magic number。
 2. 减少手工抄写偏移、位宽、mask 时的错误。
 3. 让寄存器访问代码更接近硬件文档，后续查错更方便。
-4. 把“访问寄存器”和“调度策略”拆开，避免调度器里混入大量底层地址细节。
+4. 把”访问寄存器”和”调度策略”拆开，避免调度器里混入大量底层地址细节。
 
+这不是性能优化，但它直接影响驱动后续能不能继续维护。寄存器层越稳，上层调度和功能扩展越不容易被低级错误拖住。
 
 ## 三、benchmark 测试内容
 
@@ -276,12 +278,12 @@ sequenceDiagram
     T2->>T2: waiter_B.wait() [blocked]
 
     W->>S: dispatch_idle_cores()
-    S->>S: promote_ready → running (submit_A, lane0→core0)
+    S->>S: promote_ready_and_prepare_dispatch → running (submit_A, lane0→core0)
     S->>D: comfirm_write_all(submit_A)
     S->>D: submit_ioctrl_step(core0, lane0, task_idx)
     S->>S: core_binding[0] = {A, lane0, idx}
 
-    S->>S: promote_ready → running (submit_B, lane0→core1)
+    S->>S: promote_ready_and_prepare_dispatch → running (submit_B, lane0→core1)
     S->>D: comfirm_write_all(submit_B)
     S->>D: submit_ioctrl_step(core1, lane0, task_idx)
     S->>S: core_binding[1] = {B, lane0, idx}
