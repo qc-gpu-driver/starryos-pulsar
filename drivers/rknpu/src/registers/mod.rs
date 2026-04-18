@@ -21,7 +21,7 @@ const RKNPU_PC_DATA_EXTRA_AMOUNT: u32 = 4;
 const PC_BASE_ADDRESS_OFFSET: u16 = 0x0010;
 const PC_INTERRUPT_MASK_OFFSET: u16 = 0x0020;
 const PC_TASK_CON_OFFSET: u16 = 0x0030;
-const PC_TASK_DMA_BASE_ADDR_OFFSET: u16 = 0x0034;
+const PC_task_array_dma_address_ADDR_OFFSET: u16 = 0x0034;
 const PC_INTERRUPT_STATUS_OFFSET: u16 = 0x0028;
 const PC_INTERRUPT_RAW_STATUS_OFFSET: u16 = 0x002c;
 const PC_TASK_STATUS_OFFSET: u16 = 0x003c;
@@ -68,7 +68,7 @@ impl RknpuCore {
         let job = SubmitRef {
             base: SubmitBase {
                 flags: JobMode::from_bits_retain(submit_flags),
-                task_base_addr: task_dma_addr as _,
+                task_array_dma_address: task_dma_addr as _,
                 core_idx: idx,
                 // Wait for the LAST task's interrupt (pipeline completion)
                 int_mask: rknpu_task.int_mask,
@@ -79,7 +79,7 @@ impl RknpuCore {
             regcmd_base_addr: rknpu_task.regcmd_addr as _,
         };
         debug!(
-            "[NPU] core{} start_execute_one task_dma_base={:#x} regcmd_base={:#x} regcfg_amount={} int_mask={:#x} flags={:#x}",
+            "[NPU] core{} start_execute_one task_array_dma_address={:#x} regcmd_base={:#x} regcfg_amount={} int_mask={:#x} flags={:#x}",
             idx,
             task_dma_addr,
             job.regcmd_base_addr,
@@ -133,7 +133,7 @@ impl RknpuCore {
         idx: usize,
         args: &mut RknpuSubmit,
     ) -> Result<usize, RknpuError> {
-        let task_ptr = args.task_obj_addr as *mut RknpuTask;
+        let task_ptr = args.task_array_cpu_address as *mut RknpuTask;
         let subcore = &args.subcore_task[idx];
 
         let mut task_iter = subcore.task_start as usize;
@@ -150,7 +150,7 @@ impl RknpuCore {
             let job = SubmitRef {
                 base: SubmitBase {
                     flags: JobMode::from_bits_retain(args.flags),
-                    task_base_addr: args.task_base_addr as _,
+                    task_array_dma_address: args.task_array_dma_address as _,
                     core_idx: idx,
                     // Wait for the LAST task's interrupt (pipeline completion)
                     int_mask: submit_tasks.last().unwrap().int_mask,
@@ -374,12 +374,12 @@ impl RknpuCore {
             .task_con()
             .write(|w| unsafe { w.bits(task_control) });
         debug!(
-            "Set PC TASK_DMA_BASE_ADDR to {:#x}",
-            args.base.task_base_addr
+            "Set PC task_array_dma_address_ADDR to {:#x}",
+            args.base.task_array_dma_address
         );
         self.pc()
             .task_dma_base_addr()
-            .write(|w| unsafe { w.bits(args.base.task_base_addr) });
+            .write(|w| unsafe { w.bits(args.base.task_array_dma_address) });
         mb();
         self.pc().operation_enable().write(|w| unsafe { w.bits(1) });
         mb();

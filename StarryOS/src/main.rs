@@ -10,6 +10,11 @@ extern crate alloc;
 extern crate axdriver_dyn;
 extern crate axruntime;
 
+#[allow(unused_imports)]
+#[macro_use]
+#[cfg(target_arch = "aarch64")]
+extern crate rknpu_starry_adapter;
+
 use alloc::{borrow::ToOwned, vec::Vec};
 
 use axfs_ng::FS_CONTEXT;

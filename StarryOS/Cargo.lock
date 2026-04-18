@@ -385,7 +385,6 @@ dependencies = [
  "rdif-clk",
  "rdrive",
  "rk3588-clk",
- "rknpu",
  "rockchip-pm",
  "sdmmc",
  "some-serial",
@@ -2861,8 +2860,6 @@ dependencies = [
 [[package]]
 name = "pcie"
 version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "225c81c0f672afbdd95e55abebe56541870e64e350eba9f7eabfb392112229ab"
 dependencies = [
  "bare-test-macros",
  "bit_field",
@@ -3152,8 +3149,6 @@ dependencies = [
 [[package]]
 name = "rdif-base"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f8c32d8cbc18633a412130719b07d31135215d1715ac48fc3888ca835a811ba"
 dependencies = [
  "as-any",
  "async-trait",
@@ -3165,8 +3160,6 @@ dependencies = [
 [[package]]
 name = "rdif-block"
 version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81ae1ba6c121eef2653dd2e0c88a209bb1d4d21e75e15cca71f19770ef327f81"
 dependencies = [
  "cfg-if",
  "dma-api 0.5.2",
@@ -3179,8 +3172,6 @@ dependencies = [
 [[package]]
 name = "rdif-clk"
 version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9af012204e25d45735aa141b475c411b833b4f4bc580924905745d4afbbf606"
 dependencies = [
  "rdif-base",
 ]
@@ -3208,8 +3199,6 @@ dependencies = [
 [[package]]
 name = "rdif-pcie"
 version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60c6e8dea6d432b2c03bc3f4238dc59a276aacac6f688a937351e7a313918738"
 dependencies = [
  "pci_types",
  "rdif-base",
@@ -3233,8 +3222,6 @@ dependencies = [
 [[package]]
 name = "rdrive"
 version = "0.18.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f28163d9cd26a17d444424168fde0f5f6f8b867cffdc7de617c2d0865eecf156"
 dependencies = [
  "fdt-parser",
  "log",
@@ -3250,8 +3237,6 @@ dependencies = [
 [[package]]
 name = "rdrive-macros"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eab3105c9af32e901a2adc7d920b39ff8b6ee0f6f0b7dfdeaf18f306ec12606f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3457,7 +3442,6 @@ checksum = "07aac72f95e774476db82916d79f2d303191310393830573c1ab5c821b21660a"
 [[package]]
 name = "rk3588-clk"
 version = "0.1.0"
-source = "git+https://github.com/drivercraft/rk3588-clk#2434106bb1838bc2af7c3f4de3ab6bbc15fdeb81"
 dependencies = [
  "bare-test-macros",
  "log",
@@ -3470,8 +3454,6 @@ name = "rknpu"
 version = "0.1.0"
 dependencies = [
  "aarch64-cpu-ext",
- "axklib 0.2.0 (git+https://github.com/arceos-hypervisor/arceos?branch=hypervisor)",
- "axtask",
  "bare-test-macros",
  "bitflags 2.10.0",
  "dma-api 0.5.2",
@@ -3479,10 +3461,7 @@ dependencies = [
  "mbarrier",
  "num-align",
  "rdif-base",
- "rdrive",
- "rk3588-clk",
  "rknpu-regs",
- "rockchip-pm",
  "spin 0.10.0",
  "thiserror 2.0.17",
 ]
@@ -3492,6 +3471,25 @@ name = "rknpu-regs"
 version = "0.1.0"
 dependencies = [
  "vcell",
+]
+
+[[package]]
+name = "rknpu-starry-adapter"
+version = "0.1.0"
+dependencies = [
+ "axerrno",
+ "axfs-ng-vfs",
+ "axhal",
+ "axklib 0.2.0",
+ "axtask",
+ "event-listener",
+ "lazy_static",
+ "log",
+ "memory_addr",
+ "rdrive",
+ "rknpu",
+ "rockchip-pm",
+ "starry-core",
 ]
 
 [[package]]
@@ -3509,7 +3507,6 @@ dependencies = [
 [[package]]
 name = "rockchip-pm"
 version = "0.1.0"
-source = "git+https://github.com/drivercraft/rockchip-pm.git#092d75a8b7d2c476d447c26c8db96afa00d43019"
 dependencies = [
  "bare-test-macros",
  "dma-api 0.5.2",
@@ -3979,6 +3976,7 @@ dependencies = [
  "linkme",
  "linux-raw-sys",
  "rdrive",
+ "rknpu-starry-adapter",
  "starry-api",
  "starry-core",
  "starry-process",
@@ -4026,10 +4024,9 @@ dependencies = [
  "memory_addr",
  "num_enum",
  "rand",
- "rdrive",
  "ringbuf",
  "riscv",
- "rknpu",
+ "rknpu-starry-adapter",
  "scope-local",
  "slab",
  "spin 0.10.0",

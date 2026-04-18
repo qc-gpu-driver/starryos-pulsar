@@ -212,23 +212,27 @@ submit 的生命周期状态（ready/running/complete）不是单独维护的枚
 
 ### 7.3 图一：Submit 生命周期
 
+注意:函数签名可能随着更新而改变实际函数签名以代码仓库中为准，此处只做流程解读
+
 下图展示单个 submit 从 ioctl 入队到 copy-back 返回的完整路径，以及多个并发 submit 线程如何通过独立 waiter 共享同一个 worker。
 
 ![Logo](images/sumit_life_cycle.svg "Company Logo")
 
 ### 7.4 图二：Worker 主循环与多核派发
 
+注意:函数签名可能随着更新而改变实际函数签名以代码仓库中为准，此处只做流程解读
+
+
 下图展示 worker 线程的主循环结构，以及 harvest 和 dispatch 如何交替推进多个 submit 的执行。
 
 ![Logo](images/worker_main.svg "Company Logo")
 
-## 八、总结与后续工作
 
-本轮二次开发把 RKNPU 驱动从"单核能跑"推进到了"三核能跑、能调度、能测出收益"的阶段。3-core 支持已经在 benchmark 中体现出实际价值，任务调度器也证明了 blocking submit 之下可以做统一队列管理
+## 相关仓库
+[RKNPU](https://github.com/qc-gpu-driver/RKNPU)
+[rknpu-starry-adapter](https://github.com/qc-gpu-driver/rknpu-starry-adapter)
 
-后续工作将集中在四个方向：
-
-1. 继续压缩 dispatch、harvest、同步和 worker 唤醒成本，尤其关注小任务和短 submit。
-2. 增加长时间循环 benchmark 和卡顿复现测试，重点记录 worker、core binding、IRQ status 和 waiter 状态。
-3. 把 clock、regulator、PM 能力通过 service/platform trait 接入 action 路径，让电源和频率管理进入正式接口。
-4. 继续整理 driver/service/scheduler 分层，避免调度状态重新散落到 ioctl 和低层 driver 里。
+## 演示视频
+[Video]()
+## PPT
+[PPT]()

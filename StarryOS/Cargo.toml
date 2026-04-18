@@ -45,6 +45,8 @@ axsync = { path = "arceos/modules/axsync" }
 axtask = { path = "arceos/modules/axtask", features = ["task-ext"] }
 axdriver-dyn = { path = "crates/axdriver-dyn" }
 
+
+
 axbacktrace = "0.1"
 axerrno = "0.1"
 axfs-ng-vfs = "0.1"
@@ -79,7 +81,8 @@ starry-api = { path = "./api" }
 
 rdrive = "0.18"
 
-rknpu = { git = "https://github.com/drivercraft/rknpu", features = ["starryos"] }
+rknpu = { path = "../drivers/rknpu" }
+rknpu-starry-adapter = {path = "../drivers/rknpu-starry-adapter"}
 
 [package]
 name = "starry"
@@ -153,8 +156,16 @@ optional = true
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 axplat-aarch64-dyn = {path = "crates/axplat-aarch64-dyn", features = ["irq"]}
+rknpu-starry-adapter = { workspace = true }
 
 [patch.crates-io]
+rdrive = { path = "../rdrive/rdrive" }
+rdrive-macros = { path = "../rdrive/rdrive-macros" }
+rdif-base = { path = "../rdrive/interface/rdif-base" }
+rdif-block = { path = "../rdrive/interface/rdif-block" }
+rdif-clk = { path = "../rdrive/interface/rdif-clk" }
+rdif-pcie = { path = "../rdrive/interface/rdif-pcie" }
+pcie = { path = "../rdrive/bus/pcie" }
 axbacktrace = { git = "https://github.com/Starry-OS/axbacktrace.git", rev = "09c22b6" }
 axcpu = { git = "https://github.com/Starry-OS/axcpu.git", rev = "53455db" }
 axerrno = { git = "https://github.com/Starry-OS/axerrno.git", rev = "58be232" }
@@ -175,7 +186,3 @@ starry-vm = { git = "https://github.com/Starry-OS/starry-vm.git", rev = "4c91a6b
 platforms = ["riscv64gc-unknown-none-elf", "loongarch64-unknown-none-softfloat"]
 all-features = true
 
-
-
-[patch."https://github.com/drivercraft/rknpu"]
-rknpu = { path = "../drivers/rknpu" }

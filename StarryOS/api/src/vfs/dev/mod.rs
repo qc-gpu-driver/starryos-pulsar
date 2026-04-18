@@ -1,9 +1,6 @@
 //! Special devices
 
-pub mod card0;
-pub mod card1;
 mod dma_heap;
-pub mod drm;
 #[cfg(feature = "input")]
 mod event;
 mod fb;
@@ -24,6 +21,8 @@ use axsync::Mutex;
 #[cfg(feature = "dev-log")]
 pub use log::bind_dev_log;
 use rand::{RngCore, SeedableRng, rngs::SmallRng};
+#[cfg(target_arch = "aarch64")]
+use rknpu_starry_adapter::devfs::register_rknpu_devices;
 use starry_core::vfs::{Device, DeviceOps, DirMaker, DirMapping, SimpleDir, SimpleFs};
 
 const RANDOM_SEED: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
@@ -294,27 +293,8 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         SimpleDir::new_maker(fs.clone(), Arc::new(dma_heap_dir)),
     );
 
-    // DRI devices
-    let mut dri_dir = DirMapping::new();
-    dri_dir.add(
-        "card0",
-        Device::new(
-            fs.clone(),
-            NodeType::CharacterDevice,
-            card0::CARD0_SYSTEM_DEVICE_ID,
-            Arc::new(card0::Card0::new()),
-        ),
-    );
-    dri_dir.add(
-        "card1",
-        Device::new(
-            fs.clone(),
-            NodeType::CharacterDevice,
-            card1::CARD1_SYSTEM_DEVICE_ID,
-            Arc::new(card1::Card1::new()),
-        ),
-    );
-    root.add("dri", SimpleDir::new_maker(fs.clone(), Arc::new(dri_dir)));
+    #[cfg(target_arch = "aarch64")]
+    register_rknpu_devices(fs.clone(), &mut root);
 
     // Loop devices
     for i in 0..16 {

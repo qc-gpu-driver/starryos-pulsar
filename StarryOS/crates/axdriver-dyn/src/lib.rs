@@ -8,13 +8,15 @@ use rdrive::probe::OnProbeError;
 #[macro_use]
 extern crate alloc;
 
+
+
 #[allow(unused_imports)]
 #[macro_use]
 extern crate log;
 
 mod blk;
-mod soc;
 mod serial;
+mod soc;
 
 fn iomap(base: u64, size: usize) -> Result<NonNull<u8>, OnProbeError> {
     axklib::mem::iomap((base as usize).into(), size)

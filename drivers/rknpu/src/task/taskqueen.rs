@@ -36,7 +36,7 @@ pub struct SubmitMeta {
     /// Allowed hardware-core mask. Zero means "no restriction".
     pub core_mask: u32,
     /// DMA base of the task descriptor array as seen by the NPU.
-    pub task_dma_base: u64,
+    pub task_array_dma_address: u64,
     /// Normalized per-lane task layout.
     pub lane_ranges: [RknpuSubcoreTask; RKNPU_MAX_SUBCORE_TASKS],
     /// Total number of task descriptors in `tasks`.
@@ -63,7 +63,7 @@ impl SubmitMeta {
             flags: submit.flags,
             priority: submit.priority,
             core_mask: submit.core_mask,
-            task_dma_base: submit.task_base_addr,
+            task_array_dma_address: submit.task_array_dma_address,
             lane_ranges,
             task_total,
         }
@@ -215,10 +215,10 @@ impl RknpuQueueTask {
         submit.task_number = self.meta.task_total;
         submit.task_counter = self.completed_task_count();
         submit.priority = self.meta.priority;
-        submit.task_obj_addr = 0;
+        submit.task_array_cpu_address = 0;
         submit.iommu_domain_id = self.reply.iommu_domain_id;
         submit.reserved = self.reply.reserved;
-        submit.task_base_addr = self.meta.task_dma_base;
+        submit.task_array_dma_address = self.meta.task_array_dma_address;
         submit.hw_elapse_time = if self.last_error.is_some() {
             -1
         } else if self.is_terminal_success() {
@@ -589,7 +589,7 @@ mod tests {
         let queued = RknpuQueuedSubmit::new(fake_submit(2, 0, &[(0, 0, 2)]), tasks);
 
         assert_eq!(queued.meta.task_total, 2);
-        assert_eq!(queued.meta.task_dma_base, 0);
+        assert_eq!(queued.meta.task_array_dma_address, 0);
         assert_eq!(queued.meta.lane_range(0).unwrap().task_number, 2);
     }
 
@@ -744,7 +744,7 @@ mod tests {
         submit.task_start = 9;
         submit.iommu_domain_id = 11;
         submit.reserved = 12;
-        submit.task_base_addr = 0x8800;
+        submit.task_array_dma_address = 0x8800;
         submit.core_mask = 0x7;
         submit.fence_fd = 13;
 
@@ -758,10 +758,10 @@ mod tests {
         assert_eq!(rebuilt.priority, -3);
         assert_eq!(rebuilt.iommu_domain_id, 11);
         assert_eq!(rebuilt.reserved, 12);
-        assert_eq!(rebuilt.task_base_addr, 0x8800);
+        assert_eq!(rebuilt.task_array_dma_address, 0x8800);
         assert_eq!(rebuilt.core_mask, 0x7);
         assert_eq!(rebuilt.fence_fd, 13);
-        assert_eq!(rebuilt.task_obj_addr, 0);
+        assert_eq!(rebuilt.task_array_cpu_address, 0);
     }
 
     #[test]

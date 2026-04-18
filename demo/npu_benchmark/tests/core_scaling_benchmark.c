@@ -54,6 +54,7 @@
 
 #include <errno.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,6 +76,10 @@
 #define OUTPUT_LAYOUT_C2 4
 #define DMA_SLICE_ALIGN 64U
 #define DEFAULT_TIMEOUT_MS 6000U
+#define THREAD_TEST_SINGLE_ROUNDS 2U
+#define THREAD_TEST_CONCURRENT_ROUNDS 2U
+#define THREAD_TEST_CONCURRENCY 10U
+#define THREAD_TEST_TASK_COUNT 8U
 
 typedef enum {
     OPERANDS_SHARED = 0,
@@ -182,6 +187,137 @@ typedef struct {
     int run_shared;
     int run_unique;
 } cli_options_t;
+
+typedef struct {
+    const benchmark_scenario_t *scenario;
+    operand_mode_t operand_mode;
+    uint32_t core_count;
+    uint32_t task_count;
+    uint32_t worker_index;
+    int status;
+    int error_code;
+    uint64_t submit_elapsed_us;
+    uint64_t total_elapsed_us;
+} threaded_submit_arg_t;
+
+typedef struct {
+    int success;
+    int error_code;
+    uint64_t submit_elapsed_us;
+    uint64_t total_elapsed_us;
+    uint64_t prepare_us;
+    uint64_t descriptor_us;
+} submit_case_result_t;
+
+typedef struct {
+    uint64_t min_us;
+    uint64_t max_us;
+    double mean_us;
+    double stddev_us;
+} sample_stats_t;
+
+static int compare_u64_ascending(const void *lhs, const void *rhs) {
+    uint64_t a = *(const uint64_t *)lhs;
+    uint64_t b = *(const uint64_t *)rhs;
+    if (a < b) {
+        return -1;
+    }
+    if (a > b) {
+        return 1;
+    }
+    return 0;
+}
+
+static void compute_sample_stats(const uint64_t *samples, uint32_t count, sample_stats_t *stats) {
+    if (count == 0) {
+        memset(stats, 0, sizeof(*stats));
+        return;
+    }
+
+    stats->min_us = UINT64_MAX;
+    stats->max_us = 0;
+    stats->mean_us = 0.0;
+    stats->stddev_us = 0.0;
+
+    double sum = 0.0;
+    for (uint32_t index = 0; index < count; index++) {
+        uint64_t value = samples[index];
+        if (value < stats->min_us) {
+            stats->min_us = value;
+        }
+        if (value > stats->max_us) {
+            stats->max_us = value;
+        }
+        sum += (double)value;
+    }
+    stats->mean_us = sum / (double)count;
+
+    if (count > 1) {
+        double variance_sum = 0.0;
+        for (uint32_t index = 0; index < count; index++) {
+            double delta = (double)samples[index] - stats->mean_us;
+            variance_sum += delta * delta;
+        }
+        stats->stddev_us = sqrt(variance_sum / (double)count);
+    }
+}
+
+static double percentile_us(const uint64_t *samples, uint32_t count, double percentile) {
+    uint64_t *sorted;
+    double rank;
+    uint32_t low_index;
+    uint32_t high_index;
+    double fraction;
+    double low_value;
+    double high_value;
+    double result;
+
+    if (count == 0) {
+        return 0.0;
+    }
+
+    sorted = (uint64_t *)malloc((size_t)count * sizeof(uint64_t));
+    if (!sorted) {
+        return 0.0;
+    }
+    memcpy(sorted, samples, (size_t)count * sizeof(uint64_t));
+    qsort(sorted, count, sizeof(uint64_t), compare_u64_ascending);
+
+    rank = percentile * (double)(count - 1);
+    low_index = (uint32_t)rank;
+    high_index = low_index < (count - 1) ? low_index + 1 : low_index;
+    fraction = rank - (double)low_index;
+    low_value = (double)sorted[low_index];
+    high_value = (double)sorted[high_index];
+    result = low_value + (high_value - low_value) * fraction;
+    free(sorted);
+    return result;
+}
+
+static void record_errno_bucket(
+    int error_code,
+    int *bucket_errno,
+    uint32_t *bucket_counts,
+    uint32_t *bucket_count,
+    uint32_t bucket_capacity
+) {
+    if (error_code == 0) {
+        return;
+    }
+
+    for (uint32_t index = 0; index < *bucket_count; index++) {
+        if (bucket_errno[index] == error_code) {
+            bucket_counts[index] += 1;
+            return;
+        }
+    }
+
+    if (*bucket_count < bucket_capacity) {
+        bucket_errno[*bucket_count] = error_code;
+        bucket_counts[*bucket_count] = 1;
+        *bucket_count += 1;
+    }
+}
 
 static const benchmark_scenario_t k_scenarios[] = {
     {
@@ -580,15 +716,9 @@ static void init_submit_template(
     submit->priority = 0;
     submit->task_obj_addr = resources->tasks_obj;
     submit->regcfg_obj_addr = 0;
-    submit->task_base_addr = 0;
+    submit->task_base_addr = resources->tasks_dma;
     submit->user_data = 0;
     submit->fence_fd = -1;
-
-    /*
-     * Keep the legacy zero task_base_addr contract. The current queue-driven
-     * driver path fetches one shadow task at a time and still expects this
-     * userspace field to remain zero for compatibility with the existing demos.
-     */
     distribute_tasks_to_cores(submit, resources->task_count, core_count);
 }
 
@@ -1127,6 +1257,430 @@ static int run_mode_pair(
     return 0;
 }
 
+static int run_single_submit_case(
+    int fd,
+    const benchmark_scenario_t *scenario,
+    operand_mode_t mode,
+    uint32_t core_count,
+    uint32_t task_count,
+    int verbose,
+    submit_case_result_t *result_out
+) {
+    batch_resources_t resources;
+    struct rknpu_submit submit_template;
+    uint64_t case_start_us;
+    uint64_t prepare_us;
+    uint64_t descriptor_us;
+    uint64_t submit_elapsed_us = 0;
+    uint64_t case_end_us;
+    int descriptor_status = 0;
+    int error_code = 0;
+
+    memset(result_out, 0, sizeof(*result_out));
+    case_start_us = now_us();
+
+    if (allocate_batch_resources(fd, scenario, mode, task_count, &resources) != 0) {
+        error_code = errno != 0 ? errno : ENOMEM;
+        result_out->error_code = error_code;
+        result_out->total_elapsed_us = now_us() - case_start_us;
+        return -1;
+    }
+
+    prepare_us = prepare_operand_buffers(&resources);
+    descriptor_us = build_task_descriptors_timed(&resources, &descriptor_status);
+    if (descriptor_status != 0) {
+        error_code = errno != 0 ? errno : EINVAL;
+        free_batch_resources(fd, &resources);
+        result_out->error_code = error_code;
+        result_out->prepare_us = prepare_us;
+        result_out->descriptor_us = descriptor_us;
+        result_out->total_elapsed_us = now_us() - case_start_us;
+        return -1;
+    }
+
+    init_submit_template(&resources, core_count, &submit_template);
+    if (run_submit_round(fd, &resources, &submit_template, &submit_elapsed_us, 1) != 0) {
+        error_code = errno != 0 ? errno : EIO;
+        free_batch_resources(fd, &resources);
+        result_out->error_code = error_code;
+        result_out->prepare_us = prepare_us;
+        result_out->descriptor_us = descriptor_us;
+        result_out->total_elapsed_us = now_us() - case_start_us;
+        return -1;
+    }
+
+    case_end_us = now_us();
+    result_out->success = 1;
+    result_out->error_code = 0;
+    result_out->submit_elapsed_us = submit_elapsed_us;
+    result_out->prepare_us = prepare_us;
+    result_out->descriptor_us = descriptor_us;
+    result_out->total_elapsed_us = case_end_us - case_start_us;
+
+    if (verbose) {
+        printf("    submit elapsed=%.3f ms (prepare=%.3f ms, build=%.3f ms, total=%.3f ms)\n",
+               (double)submit_elapsed_us / 1000.0,
+               (double)prepare_us / 1000.0,
+               (double)descriptor_us / 1000.0,
+               (double)result_out->total_elapsed_us / 1000.0);
+        fflush(stdout);
+    }
+    free_batch_resources(fd, &resources);
+    return 0;
+}
+
+static void *threaded_submit_worker(void *opaque) {
+    threaded_submit_arg_t *arg = (threaded_submit_arg_t *)opaque;
+    submit_case_result_t case_result;
+    int fd = npu_open();
+    if (fd < 0) {
+        fprintf(stderr, "thread[%u] failed to open /dev/dri/card1\n", arg->worker_index);
+        arg->status = -1;
+        arg->error_code = errno != 0 ? errno : ENODEV;
+        return NULL;
+    }
+
+    arg->status = run_single_submit_case(
+        fd,
+        arg->scenario,
+        arg->operand_mode,
+        arg->core_count,
+        arg->task_count,
+        0,
+        &case_result
+    );
+    arg->error_code = case_result.error_code;
+    arg->submit_elapsed_us = case_result.submit_elapsed_us;
+    arg->total_elapsed_us = case_result.total_elapsed_us;
+    if (arg->status != 0) {
+        fprintf(stderr, "thread[%u] submit case failed\n", arg->worker_index);
+    }
+    npu_close(fd);
+    return NULL;
+}
+
+static int run_multithread_submit_tests(void) {
+    const uint32_t max_errno_buckets = 16;
+    const uint32_t single_sample_capacity = THREAD_TEST_SINGLE_ROUNDS;
+    const uint32_t concurrent_sample_capacity =
+        THREAD_TEST_CONCURRENT_ROUNDS * THREAD_TEST_CONCURRENCY;
+    const benchmark_scenario_t *scenario = &k_scenarios[0];
+    uint64_t single_submit_samples[THREAD_TEST_SINGLE_ROUNDS];
+    uint64_t single_total_samples[THREAD_TEST_SINGLE_ROUNDS];
+    uint64_t concurrent_submit_samples[THREAD_TEST_CONCURRENT_ROUNDS * THREAD_TEST_CONCURRENCY];
+    uint64_t concurrent_total_samples[THREAD_TEST_CONCURRENT_ROUNDS * THREAD_TEST_CONCURRENCY];
+    uint64_t concurrent_round_wall_us[THREAD_TEST_CONCURRENT_ROUNDS];
+    uint64_t per_thread_submit_sum[THREAD_TEST_CONCURRENCY];
+    uint32_t per_thread_submit_count[THREAD_TEST_CONCURRENCY];
+    int errno_bucket_codes[16];
+    uint32_t errno_bucket_counts[16];
+    uint32_t errno_bucket_count = 0;
+    uint32_t single_submit_count = 0;
+    uint32_t single_total_count = 0;
+    uint32_t concurrent_submit_count = 0;
+    uint32_t concurrent_total_count = 0;
+    uint32_t single_success = 0;
+    uint32_t single_failure = 0;
+    uint32_t concurrent_success = 0;
+    uint32_t concurrent_failure = 0;
+    uint64_t single_round_wall_sum_us = 0;
+    uint64_t concurrent_round_wall_sum_us = 0;
+    int overall_failed = 0;
+
+    memset(single_submit_samples, 0, sizeof(single_submit_samples));
+    memset(single_total_samples, 0, sizeof(single_total_samples));
+    memset(concurrent_submit_samples, 0, sizeof(concurrent_submit_samples));
+    memset(concurrent_total_samples, 0, sizeof(concurrent_total_samples));
+    memset(concurrent_round_wall_us, 0, sizeof(concurrent_round_wall_us));
+    memset(per_thread_submit_sum, 0, sizeof(per_thread_submit_sum));
+    memset(per_thread_submit_count, 0, sizeof(per_thread_submit_count));
+    memset(errno_bucket_codes, 0, sizeof(errno_bucket_codes));
+    memset(errno_bucket_counts, 0, sizeof(errno_bucket_counts));
+
+    printf("\nthreaded submit tests: %u single-thread rounds, then %u rounds of %u-thread concurrency\n",
+           THREAD_TEST_SINGLE_ROUNDS,
+           THREAD_TEST_CONCURRENT_ROUNDS,
+           THREAD_TEST_CONCURRENCY);
+    printf("  scenario=%s mode=%s task_count=%u core_count=1\n",
+           scenario->name,
+           operand_mode_name(OPERANDS_SHARED),
+           THREAD_TEST_TASK_COUNT);
+    fflush(stdout);
+
+    for (uint32_t round = 0; round < THREAD_TEST_SINGLE_ROUNDS; round++) {
+        submit_case_result_t case_result;
+        int fd = npu_open();
+        int status;
+        uint64_t round_start_us = now_us();
+        uint64_t round_end_us;
+        if (fd < 0) {
+            fprintf(stderr, "single-thread round %u failed to open /dev/dri/card1\n", round + 1);
+            single_failure += 1;
+            overall_failed = 1;
+            record_errno_bucket(
+                errno != 0 ? errno : ENODEV,
+                errno_bucket_codes,
+                errno_bucket_counts,
+                &errno_bucket_count,
+                max_errno_buckets
+            );
+            continue;
+        }
+
+        printf("  [single-thread round %u/%u]\n", round + 1, THREAD_TEST_SINGLE_ROUNDS);
+        fflush(stdout);
+        status = run_single_submit_case(
+            fd,
+            scenario,
+            OPERANDS_SHARED,
+            1,
+            THREAD_TEST_TASK_COUNT,
+            1,
+            &case_result
+        );
+        round_end_us = now_us();
+        npu_close(fd);
+        single_round_wall_sum_us += round_end_us - round_start_us;
+
+        if (status != 0) {
+            fprintf(stderr, "single-thread round %u failed\n", round + 1);
+            single_failure += 1;
+            overall_failed = 1;
+            record_errno_bucket(
+                case_result.error_code,
+                errno_bucket_codes,
+                errno_bucket_counts,
+                &errno_bucket_count,
+                max_errno_buckets
+            );
+            continue;
+        }
+
+        single_success += 1;
+        if (single_submit_count < single_sample_capacity) {
+            single_submit_samples[single_submit_count++] = case_result.submit_elapsed_us;
+        }
+        if (single_total_count < single_sample_capacity) {
+            single_total_samples[single_total_count++] = case_result.total_elapsed_us;
+        }
+    }
+
+    for (uint32_t round = 0; round < THREAD_TEST_CONCURRENT_ROUNDS; round++) {
+        pthread_t workers[THREAD_TEST_CONCURRENCY];
+        threaded_submit_arg_t args[THREAD_TEST_CONCURRENCY];
+        uint32_t started = 0;
+        uint64_t round_start_us = now_us();
+        uint64_t round_end_us;
+        uint64_t round_submit_samples[THREAD_TEST_CONCURRENCY];
+        uint32_t round_submit_count = 0;
+
+        printf("  [10-thread concurrent round %u/%u]\n",
+               round + 1,
+               THREAD_TEST_CONCURRENT_ROUNDS);
+        fflush(stdout);
+
+        memset(args, 0, sizeof(args));
+        for (uint32_t thread_index = 0; thread_index < THREAD_TEST_CONCURRENCY; thread_index++) {
+            int err;
+            args[thread_index].scenario = scenario;
+            args[thread_index].operand_mode = OPERANDS_SHARED;
+            args[thread_index].core_count = 1;
+            args[thread_index].task_count = THREAD_TEST_TASK_COUNT;
+            args[thread_index].worker_index = thread_index;
+            args[thread_index].status = -1;
+
+            err = pthread_create(&workers[thread_index], NULL, threaded_submit_worker, &args[thread_index]);
+            if (err != 0) {
+                fprintf(stderr,
+                        "pthread_create failed at thread %u: %s\n",
+                        thread_index,
+                        strerror(err));
+                record_errno_bucket(
+                    err,
+                    errno_bucket_codes,
+                    errno_bucket_counts,
+                    &errno_bucket_count,
+                    max_errno_buckets
+                );
+                for (uint32_t join_index = 0; join_index < started; join_index++) {
+                    pthread_join(workers[join_index], NULL);
+                }
+                return -1;
+            }
+            started += 1;
+        }
+
+        for (uint32_t thread_index = 0; thread_index < THREAD_TEST_CONCURRENCY; thread_index++) {
+            pthread_join(workers[thread_index], NULL);
+            if (args[thread_index].status == 0) {
+                concurrent_success += 1;
+                if (concurrent_submit_count < concurrent_sample_capacity) {
+                    concurrent_submit_samples[concurrent_submit_count++] = args[thread_index].submit_elapsed_us;
+                }
+                if (concurrent_total_count < concurrent_sample_capacity) {
+                    concurrent_total_samples[concurrent_total_count++] = args[thread_index].total_elapsed_us;
+                }
+                if (round_submit_count < THREAD_TEST_CONCURRENCY) {
+                    round_submit_samples[round_submit_count++] = args[thread_index].submit_elapsed_us;
+                }
+                per_thread_submit_sum[thread_index] += args[thread_index].submit_elapsed_us;
+                per_thread_submit_count[thread_index] += 1;
+            } else {
+                concurrent_failure += 1;
+                overall_failed = 1;
+                fprintf(stderr,
+                        "concurrent round %u failed at thread %u\n",
+                        round + 1,
+                        thread_index);
+                record_errno_bucket(
+                    args[thread_index].error_code != 0 ? args[thread_index].error_code : EIO,
+                    errno_bucket_codes,
+                    errno_bucket_counts,
+                    &errno_bucket_count,
+                    max_errno_buckets
+                );
+            }
+        }
+
+        round_end_us = now_us();
+        concurrent_round_wall_us[round] = round_end_us - round_start_us;
+        concurrent_round_wall_sum_us += concurrent_round_wall_us[round];
+
+        {
+            sample_stats_t round_stats;
+            double round_p50 = percentile_us(round_submit_samples, round_submit_count, 0.50);
+            double round_p90 = percentile_us(round_submit_samples, round_submit_count, 0.90);
+            double round_p99 = percentile_us(round_submit_samples, round_submit_count, 0.99);
+            double round_throughput = concurrent_round_wall_us[round] > 0
+                ? ((double)round_submit_count * 1000000.0) / (double)concurrent_round_wall_us[round]
+                : 0.0;
+
+            compute_sample_stats(round_submit_samples, round_submit_count, &round_stats);
+            printf("    round summary: success=%u/%u wall=%.3f ms throughput=%.2f submit/s\n",
+                   round_submit_count,
+                   THREAD_TEST_CONCURRENCY,
+                   (double)concurrent_round_wall_us[round] / 1000.0,
+                   round_throughput);
+            if (round_submit_count > 0) {
+                printf("      latency p50/p90/p99: %.3f / %.3f / %.3f ms\n",
+                       round_p50 / 1000.0,
+                       round_p90 / 1000.0,
+                       round_p99 / 1000.0);
+                printf("      fairness (mean/min/max/stddev): %.3f / %.3f / %.3f / %.3f ms\n",
+                       round_stats.mean_us / 1000.0,
+                       (double)round_stats.min_us / 1000.0,
+                       (double)round_stats.max_us / 1000.0,
+                       round_stats.stddev_us / 1000.0);
+            }
+            fflush(stdout);
+        }
+    }
+
+    {
+        double single_success_rate = (double)single_success * 100.0 /
+            (double)(THREAD_TEST_SINGLE_ROUNDS == 0 ? 1 : THREAD_TEST_SINGLE_ROUNDS);
+        double concurrent_success_rate = (double)concurrent_success * 100.0 /
+            (double)(THREAD_TEST_CONCURRENT_ROUNDS * THREAD_TEST_CONCURRENCY);
+        double single_throughput = single_round_wall_sum_us > 0
+            ? ((double)single_success * 1000000.0) / (double)single_round_wall_sum_us
+            : 0.0;
+        double concurrent_throughput = concurrent_round_wall_sum_us > 0
+            ? ((double)concurrent_success * 1000000.0) / (double)concurrent_round_wall_sum_us
+            : 0.0;
+        double single_p50 = percentile_us(single_submit_samples, single_submit_count, 0.50);
+        double single_p90 = percentile_us(single_submit_samples, single_submit_count, 0.90);
+        double single_p99 = percentile_us(single_submit_samples, single_submit_count, 0.99);
+        double concurrent_p50 = percentile_us(concurrent_submit_samples, concurrent_submit_count, 0.50);
+        double concurrent_p90 = percentile_us(concurrent_submit_samples, concurrent_submit_count, 0.90);
+        double concurrent_p99 = percentile_us(concurrent_submit_samples, concurrent_submit_count, 0.99);
+        sample_stats_t single_stats;
+        sample_stats_t concurrent_stats;
+        uint64_t per_thread_avg_samples[THREAD_TEST_CONCURRENCY];
+        uint32_t per_thread_avg_count = 0;
+        sample_stats_t per_thread_fairness_stats;
+        double latency_slowdown = 0.0;
+        double throughput_speedup = 0.0;
+
+        compute_sample_stats(single_submit_samples, single_submit_count, &single_stats);
+        compute_sample_stats(concurrent_submit_samples, concurrent_submit_count, &concurrent_stats);
+
+        for (uint32_t thread_index = 0; thread_index < THREAD_TEST_CONCURRENCY; thread_index++) {
+            if (per_thread_submit_count[thread_index] > 0) {
+                per_thread_avg_samples[per_thread_avg_count++] =
+                    per_thread_submit_sum[thread_index] / per_thread_submit_count[thread_index];
+            }
+        }
+        compute_sample_stats(per_thread_avg_samples, per_thread_avg_count, &per_thread_fairness_stats);
+
+        if (single_stats.mean_us > 0.0 && concurrent_stats.mean_us > 0.0) {
+            latency_slowdown = concurrent_stats.mean_us / single_stats.mean_us;
+        }
+        if (single_throughput > 0.0 && concurrent_throughput > 0.0) {
+            throughput_speedup = concurrent_throughput / single_throughput;
+        }
+
+        printf("\nthreaded metrics summary\n");
+        printf("  single-thread success: %u success, %u failure (%.2f%%)\n",
+               single_success, single_failure, single_success_rate);
+        printf("  concurrent success   : %u success, %u failure (%.2f%%)\n",
+               concurrent_success, concurrent_failure, concurrent_success_rate);
+        printf("  single throughput    : %.2f submit/s (%u submits, %.3f ms total wall)\n",
+               single_throughput,
+               single_success,
+               (double)single_round_wall_sum_us / 1000.0);
+        printf("  concurrent throughput: %.2f submit/s (%u submits, %.3f ms total wall)\n",
+               concurrent_throughput,
+               concurrent_success,
+               (double)concurrent_round_wall_sum_us / 1000.0);
+        printf("  latency p50/p90/p99 single    : %.3f / %.3f / %.3f ms\n",
+               single_p50 / 1000.0, single_p90 / 1000.0, single_p99 / 1000.0);
+        printf("  latency p50/p90/p99 concurrent: %.3f / %.3f / %.3f ms\n",
+               concurrent_p50 / 1000.0, concurrent_p90 / 1000.0, concurrent_p99 / 1000.0);
+        printf("  latency mean/stddev single    : %.3f / %.3f ms\n",
+               single_stats.mean_us / 1000.0, single_stats.stddev_us / 1000.0);
+        printf("  latency mean/stddev concurrent: %.3f / %.3f ms\n",
+               concurrent_stats.mean_us / 1000.0, concurrent_stats.stddev_us / 1000.0);
+        printf("  fairness (per-thread avg submit, mean/min/max/stddev): %.3f / %.3f / %.3f / %.3f ms\n",
+               per_thread_fairness_stats.mean_us / 1000.0,
+               (double)per_thread_fairness_stats.min_us / 1000.0,
+               (double)per_thread_fairness_stats.max_us / 1000.0,
+               per_thread_fairness_stats.stddev_us / 1000.0);
+        if (per_thread_fairness_stats.min_us > 0) {
+            printf("  fairness max/min ratio: %.3f x\n",
+                   (double)per_thread_fairness_stats.max_us /
+                       (double)per_thread_fairness_stats.min_us);
+        }
+        printf("  concurrent degradation (latency ratio concurrent/single): %.3f x\n",
+               latency_slowdown);
+        printf("  concurrent gain (throughput ratio concurrent/single): %.3f x\n",
+               throughput_speedup);
+        printf("  sample size: single=%u, concurrent=%u\n",
+               single_submit_count,
+               concurrent_submit_count);
+        if (single_submit_count < 20 || concurrent_submit_count < 20) {
+            printf("  sample-size note: current configuration is functional-smoke scale; "
+                   "increase rounds for stronger statistical confidence.\n");
+        }
+
+        if (errno_bucket_count > 0) {
+            printf("  errno buckets:\n");
+            for (uint32_t bucket = 0; bucket < errno_bucket_count; bucket++) {
+                printf("    errno=%d (%s): %u\n",
+                       errno_bucket_codes[bucket],
+                       strerror(errno_bucket_codes[bucket]),
+                       errno_bucket_counts[bucket]);
+            }
+        } else {
+            printf("  errno buckets: none\n");
+        }
+        fflush(stdout);
+    }
+
+    printf("threaded submit tests complete\n");
+    fflush(stdout);
+    return overall_failed ? -1 : 0;
+}
+
 int main(int argc, char **argv) {
     cli_options_t options;
     int fd;
@@ -1161,6 +1715,12 @@ int main(int argc, char **argv) {
     planned_submit_rounds = count_planned_submit_rounds(&options);
     printf("  selected pairs  : %u\n", total_mode_pairs);
     printf("  planned submits : %u blocking ioctl rounds\n", planned_submit_rounds);
+
+    if (run_multithread_submit_tests() != 0) {
+        fprintf(stderr, "threaded submit tests failed\n");
+        overall_status = 1;
+        goto done;
+    }
 
     for (size_t scenario_index = 0; scenario_index < sizeof(k_scenarios) / sizeof(k_scenarios[0]); scenario_index++) {
         const benchmark_scenario_t *scenario = &k_scenarios[scenario_index];
@@ -1215,6 +1775,7 @@ int main(int argc, char **argv) {
         overall_status = 1;
     }
 
+done:
     printf("\nbenchmark complete status=%d\n", overall_status);
     fflush(stdout);
     npu_close(fd);

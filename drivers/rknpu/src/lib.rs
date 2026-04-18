@@ -21,14 +21,6 @@ mod job;
 mod osal;
 mod registers;
 pub mod service;
-#[cfg(feature = "starryos")]
-pub mod power;
-#[cfg(feature = "starryos")]
-mod irq;
-#[cfg(feature = "starryos")]
-mod tool;
-#[cfg(feature = "starryos")]
-mod npuprobe;
 pub mod status;
 mod task;
 use alloc::vec::Vec;

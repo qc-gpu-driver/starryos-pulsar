@@ -60,7 +60,7 @@ struct DispatchSetup {
     /// Total number of task descriptors in this submit.
     task_total: u32,
     /// DMA base of the task descriptor array.
-    task_dma_base: u64,
+    task_array_dma_address: u64,
     /// Snapshot of the task descriptor used to program hardware.
     task: RknpuTask,
 }
@@ -239,7 +239,7 @@ impl<W: RknpuSubmitWaiter> NpuSchedulerState<W> {
             binding,
             submit_flags: meta.flags,
             task_total: task.tasks.len() as u32,
-            task_dma_base: meta.task_dma_base,
+            task_array_dma_address: meta.task_array_dma_address,
             task: task_snapshot,
         })
     }
@@ -351,7 +351,7 @@ impl<P: RknpuPlatform> RknpuService<P> {
             submit_snapshot.priority,
             submit_snapshot.task_total,
             submit_snapshot.core_mask,
-            submit_snapshot.task_dma_base,
+            submit_snapshot.task_array_dma_address,
             spawn_worker,
             submit_snapshot.lane_ranges[0].task_start,
             submit_snapshot.lane_ranges[0].task_number,
@@ -716,7 +716,7 @@ impl<P: RknpuPlatform> RknpuService<P> {
                     setup.core_slot,
                     setup.submit_flags,
                     setup.task_total,
-                    setup.task_dma_base,
+                    setup.task_array_dma_address,
                     setup.binding.lane_slot,
                     setup.binding.task_index,
                     &mut setup.task,

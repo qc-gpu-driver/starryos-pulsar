@@ -24,8 +24,7 @@ rdif-clk = "0.4"
 rdif-block = {version = "0.6.2"}
 axklib = {git = "https://github.com/arceos-hypervisor/arceos", branch = "hypervisor"}
 
-rockchip-pm = {git = "https://github.com/drivercraft/rockchip-pm.git"}
-rk3588-clk = {git = "https://github.com/drivercraft/rk3588-clk"}
+rockchip-pm = {path = "../../../drivers/rockchip-pm"}
+rk3588-clk = {path = "../../../drivers/rk3588-clk"}
 sdmmc = { git = "https://github.com/YanQD/sdmmc.git" }
-rknpu = { git = "https://github.com/drivercraft/rknpu", features = ["starryos"] }
 some-serial = "0.2"

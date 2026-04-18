@@ -64,8 +64,8 @@ zerocopy = { version = "0.8.26", features = ["derive"] }
 
 starry-core.workspace = true
 
-rdrive.workspace = true
-rknpu.workspace = true
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+rknpu-starry-adapter = { path = "../../drivers/rknpu-starry-adapter" }
 
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]

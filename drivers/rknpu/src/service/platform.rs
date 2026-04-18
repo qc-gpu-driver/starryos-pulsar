@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 use crate::{Rknpu, RknpuError};
 
 use super::error::RknpuServiceError;

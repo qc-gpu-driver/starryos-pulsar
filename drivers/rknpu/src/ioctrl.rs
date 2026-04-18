@@ -54,8 +54,8 @@ pub struct RknpuMemDestroy {
 ///
 /// ```text
 ///  flags            -- JobMode bits (PC, NONBLOCK, PINGPONG, ...)
-///  task_obj_addr    -- CPU address of the `RknpuTask[]` array
-///  task_base_addr   -- DMA address of the same array
+///  task_array_cpu_address    -- CPU address of the `RknpuTask[]` array
+///  task_array_dma_address   -- DMA address of the same array
 ///  subcore_task[5]  -- task ranges per core slot
 ///  core_mask        -- core selection bitmask
 /// ```
@@ -75,13 +75,13 @@ pub struct RknpuSubmit {
     /// Scheduling priority hint. Lower values mean higher priority.
     pub priority: i32,
     /// CPU virtual address of the `RknpuTask[]` array.
-    pub task_obj_addr: u64,
+    pub task_array_cpu_address: u64,
     /// IOMMU domain identifier used for address translation.
     pub iommu_domain_id: u32,
     /// Reserved field kept for ABI compatibility.
     pub reserved: u32,
     /// DMA or bus address of the `RknpuTask[]` array.
-    pub task_base_addr: u64,
+    pub task_array_dma_address: u64,
     /// Filled by the driver with a hardware execution-time estimate.
     pub hw_elapse_time: i64,
     /// Bitmask selecting which NPU cores may be used.
@@ -145,7 +145,7 @@ impl Rknpu {
     /// queue scheduler. That layer may sleep the submitter thread, harvest IRQ
     /// completions, and dispatch follow-up tasks later on.
     ///
-    /// Legacy userspace may leave `task_base_addr` as zero. The previous submit
+    /// Legacy userspace may leave `task_array_dma_address` as zero. The previous submit
     /// path forwarded that zero unchanged, so the queue scheduler preserves the
     /// same behavior instead of rejecting the submit.
     pub fn submit_ioctrl_step(
@@ -170,7 +170,7 @@ impl Rknpu {
 
         if task_total == 0 {
             debug!(
-                "[NPU] submit_ioctrl_step rejected empty submit core={} task_base_addr={:#x}",
+                "[NPU] submit_ioctrl_step rejected empty submit core={} task_array_dma_address={:#x}",
                 core_slot, task_dma_base
             );
             return Err(RknpuError::InvalidParameter);
@@ -184,7 +184,7 @@ impl Rknpu {
             return Err(RknpuError::InvalidParameter);
         }
 
-        // `task_base_addr` belongs to the legacy DMA task-array contract. The
+        // `task_array_dma_address` belongs to the legacy DMA task-array contract. The
         // new queue path still preserves the visible field, but it may remain
         // zero while the real task descriptor is supplied through `task`.
         let task_dma_addr = if task_dma_base == 0 {
@@ -200,7 +200,7 @@ impl Rknpu {
         let regcfg_amount = task.regcfg_amount;
         let int_mask = task.int_mask;
         debug!(
-            "[NPU] submit_ioctrl_step dispatch core={} subcore={} task_index={} task_number={} flags={:#x} task_base_addr={:#x} task_dma_addr={:#x} regcmd_addr={:#x} regcfg_amount={} int_mask={:#x}",
+            "[NPU] submit_ioctrl_step dispatch core={} subcore={} task_index={} task_number={} flags={:#x} task_array_dma_address={:#x} task_dma_addr={:#x} regcmd_addr={:#x} regcfg_amount={} int_mask={:#x}",
             core_slot,
             subcore_slot,
             task_index,
@@ -264,8 +264,8 @@ mod tests {
 
     fn fake_submit(tasks: &mut [RknpuTask], task_number: u32) -> RknpuSubmit {
         let mut submit = RknpuSubmit::default();
-        submit.task_obj_addr = tasks.as_mut_ptr() as u64;
-        submit.task_base_addr = 0x2000;
+        submit.task_array_cpu_address = tasks.as_mut_ptr() as u64;
+        submit.task_array_dma_address = 0x2000;
         submit.task_number = task_number;
         submit.core_mask = 0x1;
         submit.subcore_task[0].task_start = 0;
@@ -284,7 +284,7 @@ mod tests {
                 3,
                 submit.flags,
                 submit.task_number,
-                submit.task_base_addr,
+                submit.task_array_dma_address,
                 0,
                 0,
                 &mut tasks[0],
@@ -307,7 +307,7 @@ mod tests {
             0,
             submit.flags,
             submit.task_number,
-            submit.task_base_addr,
+            submit.task_array_dma_address,
             0,
             0,
             &mut tasks[0],
@@ -336,7 +336,7 @@ mod tests {
                 0,
                 submit.flags,
                 submit.task_number,
-                submit.task_base_addr,
+                submit.task_array_dma_address,
                 0,
                 1,
                 &mut tasks[0],
@@ -347,20 +347,20 @@ mod tests {
     }
 
     #[test]
-    fn submit_step_accepts_legacy_zero_task_base_addr() {
+    fn submit_step_accepts_legacy_zero_task_array_dma_address() {
         let (mut npu, mmios) = build_fake_rknpu();
         let mut tasks = [RknpuTask {
             int_mask: 0x300,
             ..RknpuTask::default()
         }];
         let mut submit = fake_submit(&mut tasks, 1);
-        submit.task_base_addr = 0;
+        submit.task_array_dma_address = 0;
 
         npu.submit_ioctrl_step(
             0,
             submit.flags,
             submit.task_number,
-            submit.task_base_addr,
+            submit.task_array_dma_address,
             0,
             0,
             &mut tasks[0],

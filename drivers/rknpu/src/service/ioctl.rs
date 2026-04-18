@@ -100,41 +100,41 @@ impl<P: RknpuPlatform> RknpuService<P> {
     fn handle_submit_ioctl(&self, arg: usize) -> Result<usize, RknpuServiceError> {
         let submit_args = self.copy_from_user::<RknpuSubmit>(arg)?;
 
-        if submit_args.task_number == 0 || submit_args.task_obj_addr == 0 {
+        if submit_args.task_number == 0 || submit_args.task_array_cpu_address == 0 {
             debug!(
-                "rknpu invalid submit header: task_number={}, task_obj_addr={:#x}, \
-                 task_base_addr={:#x}",
-                submit_args.task_number, submit_args.task_obj_addr, submit_args.task_base_addr,
+                "rknpu invalid submit header: task_number={}, task_array_cpu_address={:#x}, \
+                 task_array_dma_address={:#x}",
+                submit_args.task_number, submit_args.task_array_cpu_address, submit_args.task_array_dma_address,
             );
             return Err(RknpuServiceError::InvalidData);
         }
 
-        if submit_args.task_base_addr == 0 {
+        if submit_args.task_array_dma_address == 0 {
             debug!(
-                "rknpu submit header keeps legacy zero task_base_addr, scheduler will preserve \
+                "rknpu submit header keeps legacy zero task_array_dma_address, scheduler will preserve \
                  zero DMA base"
             );
         }
 
-        let user_task_obj_addr = submit_args.task_obj_addr;
+        let user_task_array_cpu_address = submit_args.task_array_cpu_address;
         let task_bytes = (submit_args.task_number as usize)
             .checked_mul(mem::size_of::<RknpuTask>())
             .ok_or(RknpuServiceError::InvalidData)?;
         let mut tasks = vec![RknpuTask::default(); submit_args.task_number as usize];
         self.inner.platform.copy_from_user(
             tasks.as_mut_ptr() as *mut u8,
-            user_task_obj_addr as *const u8,
+            user_task_array_cpu_address as *const u8,
             task_bytes,
         )?;
 
         debug!(
             "[rknpu-submit] queueing blocking submit task_number={} core_mask={:#x} \
-             timeout={} task_base_addr={:#x} user_task_obj_addr={:#x}",
+             timeout={} task_array_dma_address={:#x} user_task_array_cpu_address={:#x}",
             submit_args.task_number,
             submit_args.core_mask,
             submit_args.timeout,
-            submit_args.task_base_addr,
-            user_task_obj_addr
+            submit_args.task_array_dma_address,
+            user_task_array_cpu_address
         );
         let queue_task_id =
             self.enqueue_submit(RknpuQueuedSubmit::new(submit_args.clone(), tasks))?;
@@ -151,7 +151,7 @@ impl<P: RknpuPlatform> RknpuService<P> {
         );
         let finished = self.take_terminal_submit(queue_task_id)?;
         let mut finished_submit = finished.submit;
-        finished_submit.task_obj_addr = user_task_obj_addr;
+        finished_submit.task_array_cpu_address = user_task_array_cpu_address;
 
         debug!(
             "[rknpu-submit] terminal queue_task={} task_counter={} last_error={:?}",
@@ -159,7 +159,7 @@ impl<P: RknpuPlatform> RknpuService<P> {
         );
 
         self.inner.platform.copy_to_user(
-            user_task_obj_addr as *mut u8,
+            user_task_array_cpu_address as *mut u8,
             finished.tasks.as_ptr() as *const u8,
             task_bytes,
         )?;
