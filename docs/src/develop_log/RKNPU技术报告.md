@@ -239,4 +239,4 @@ submit 的生命周期状态（ready/running/complete）不是单独维护的枚
 ## 演示视频
 [Video](https://pan.baidu.com/s/1evJunV6zBck-QZ5HVqKMcQ?pwd=1234)
 ## PPT
-[PPT](./ppt/RKNPU驱动开发工作汇报.pptx)
+[PPT](https://pan.baidu.com/s/1RGDsclfVY1zVTF6EM8dYkQ?pwd=1234)
