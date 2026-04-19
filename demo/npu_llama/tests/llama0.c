@@ -104,41 +104,7 @@ typedef struct {
     int in_use;
 } NPUBuffer;
 
-#define MAX_BUFFER_POOL_SIZE 12
-#define NPU_MAX_CORES 3
-#define NPU_MAX_M_PER_TASK 544
-#define NPU_MATMUL_OUTPUT_LANES 16
-/*
- * The FFN split path (w1/w2/w3 across 3 NPU cores) is still under board-side
- * validation. Keep it disabled by default so llama uses the last known-good
- * path while the split implementation is debugged separately.
- */
-#define ENABLE_FFN_SPLIT_NPU 0
-
-typedef struct {
-    int part_count;
-    int row_start[NPU_MAX_CORES];
-    int row_count[NPU_MAX_CORES];
-} NPURowSplitPlan;
-
-/*
- * StarryOS current tree no longer exposes the legacy DumpStatus ioctl,
- * so keep this disabled by default to avoid issuing unsupported commands
- * during normal llama runs.
- */
-static int g_enable_npu_dump = 0;
-
-/* 通过 dump ioctl 打印当前 submit/owner 视角下的 NPU 状态。 */
-static void maybe_dump_npu_status(int npu_fd, const char *stage, struct rknpu_submit *submit) {
-    if (!g_enable_npu_dump || npu_fd < 0 || submit == NULL) {
-        return;
-    }
-
-    printf("[npu-dump] %s\n", stage);
-    if (ioctl(npu_fd, DRM_IOCTL_RKNPU_DUMP_STATUS, submit) < 0) {
-        printf("[npu-dump] ioctl failed at %s: errno=%d (%s)\n", stage, errno, strerror(errno));
-    }
-}
+#define MAX_BUFFER_POOL_SIZE 8
 #endif
 
 typedef struct {
@@ -152,14 +118,13 @@ typedef struct {
 #if USE_NPU
     // NPU resources
     int npu_fd;
-    // Per-core regcmd buffers for multi-core parallel submission
-    uint64_t regcmd_dma[NPU_MAX_CORES], regcmd_obj[NPU_MAX_CORES];
-    uint32_t regcmd_handle[NPU_MAX_CORES];
-    uint64_t *regcmd[NPU_MAX_CORES];
+    uint64_t regcmd_dma, regcmd_obj;
+    uint32_t regcmd_handle;
+    uint64_t *regcmd;
     uint64_t tasks_dma, tasks_obj;
     uint32_t tasks_handle;
     struct rknpu_task *tasks;
-    uint64_t npu_regs[NPU_MAX_CORES][112];
+    uint64_t npu_regs[112];
     
     // Statistics
     int npu_calls;
@@ -175,12 +140,6 @@ typedef struct {
         NPUWeightCache *w1_cache;  // [n_layers]
         NPUWeightCache *w2_cache;  // [n_layers]
         NPUWeightCache *w3_cache;  // [n_layers]
-        NPUWeightCache (*w1_split_cache)[NPU_MAX_CORES];  // [n_layers][NPU_MAX_CORES]
-        NPUWeightCache (*w2_split_cache)[NPU_MAX_CORES];  // [n_layers][NPU_MAX_CORES]
-        NPUWeightCache (*w3_split_cache)[NPU_MAX_CORES];  // [n_layers][NPU_MAX_CORES]
-        NPURowSplitPlan w1_split_plan;
-        NPURowSplitPlan w2_split_plan;
-        NPURowSplitPlan w3_split_plan;
         NPUWeightCache *wcls_cache;
         int enabled;
     } weight_cache;
@@ -327,83 +286,6 @@ void free_weight_cache(int npu_fd, NPUWeightCache* cache) {
     // The array itself will be freed separately
 }
 
-/*
- * Split one logical matmul output dimension into up to 3 row chunks.
- * For d > 1 the NPU requires row counts to stay 4-aligned, so we split
- * in units of 4 rows and keep the chunks balanced across the available cores.
- */
-static int build_row_split_plan(int total_rows, NPURowSplitPlan* plan) {
-    memset(plan, 0, sizeof(*plan));
-    if (total_rows <= 0) {
-        return -1;
-    }
-    if (total_rows == 1) {
-        plan->part_count = 1;
-        plan->row_count[0] = 1;
-        return 0;
-    }
-    if ((total_rows % 4) != 0 || total_rows > NPU_MAX_M_PER_TASK * NPU_MAX_CORES) {
-        return -1;
-    }
-
-    int total_quads = total_rows / 4;
-    int part_count = total_quads < NPU_MAX_CORES ? total_quads : NPU_MAX_CORES;
-    int base_quads = total_quads / part_count;
-    int extra_quads = total_quads % part_count;
-    int row_start = 0;
-
-    plan->part_count = part_count;
-    for (int c = 0; c < part_count; c++) {
-        int row_count = (base_quads + (c < extra_quads ? 1 : 0)) * 4;
-        if (row_count <= 0 || row_count > NPU_MAX_M_PER_TASK) {
-            memset(plan, 0, sizeof(*plan));
-            return -1;
-        }
-        plan->row_start[c] = row_start;
-        plan->row_count[c] = row_count;
-        row_start += row_count;
-    }
-
-    return row_start == total_rows ? 0 : -1;
-}
-
-static int cache_split_weight_layers(
-    int npu_fd,
-    NPUWeightCache (*dst)[NPU_MAX_CORES],
-    int n_layers,
-    const NPURowSplitPlan* plan,
-    float* weights_base,
-    size_t layer_stride,
-    int cols
-) {
-    int cached = 0;
-
-    if (!dst || !plan || plan->part_count <= 0) {
-        return 0;
-    }
-
-    for (int l = 0; l < n_layers; l++) {
-        float* layer_base = weights_base + (size_t)l * layer_stride;
-        for (int c = 0; c < plan->part_count; c++) {
-            int row_start = plan->row_start[c];
-            int row_count = plan->row_count[c];
-            NPUWeightCache* split = create_weight_cache(
-                npu_fd,
-                layer_base + (size_t)row_start * cols,
-                row_count,
-                cols
-            );
-            if (split) {
-                dst[l][c] = *split;
-                free(split);
-                cached++;
-            }
-        }
-    }
-
-    return cached;
-}
-
 // OPTIMIZATION: Initialize larger buffer pool
 void init_buffer_pool(Transformer* t) {
     if (t->buffer_pool_initialized) return;
@@ -418,11 +300,7 @@ void init_buffer_pool(Transformer* t) {
         256 * 1024,       // 256KB
         256 * 1024,       // 256KB (duplicate)
         128 * 1024,       // 128KB
-        128 * 1024,       // 128KB (duplicate)
-        512 * 1024,       // 512KB (3-core Q)
-        512 * 1024,       // 512KB (3-core K)
-        256 * 1024,       // 256KB (3-core V)
-        256 * 1024        // 256KB (3-core V dup)
+        128 * 1024        // 128KB (duplicate)
     };
     
     int successful = 0;
@@ -498,28 +376,19 @@ void build_transformer(Transformer *t, char* checkpoint_path) {
         return;
     }
     
-    // Allocate NPU control structures — one regcmd buffer per core
-    int alloc_ok = 1;
-    for (int c = 0; c < NPU_MAX_CORES; c++) {
-        t->regcmd[c] = mem_allocate(t->npu_fd, 1024,
-                                    &t->regcmd_dma[c], &t->regcmd_obj[c],
-                                    0, &t->regcmd_handle[c]);
-        if (!t->regcmd[c]) { alloc_ok = 0; break; }
-    }
-    t->tasks = mem_allocate(t->npu_fd, 4096, &t->tasks_dma, &t->tasks_obj, 
+    // Allocate NPU control structures
+    t->regcmd = mem_allocate(t->npu_fd, 1024, &t->regcmd_dma, &t->regcmd_obj, 0, &t->regcmd_handle);
+    t->tasks = mem_allocate(t->npu_fd, 1024, &t->tasks_dma, &t->tasks_obj, 
                            RKNPU_MEM_KERNEL_MAPPING, &t->tasks_handle);
     
-    if (!alloc_ok || t->tasks == NULL) {
+    if (t->regcmd == NULL || t->tasks == NULL) {
         fprintf(stderr, "Warning: Failed to allocate NPU memory, will use CPU only\n");
-        for (int c = 0; c < NPU_MAX_CORES; c++) {
-            if (t->regcmd[c]) {
-                munmap(t->regcmd[c], 1024);
-                mem_destroy(t->npu_fd, t->regcmd_handle[c], t->regcmd_obj[c]);
-                t->regcmd[c] = NULL;
-            }
+        if (t->regcmd) {
+            munmap(t->regcmd, 1024);
+            mem_destroy(t->npu_fd, t->regcmd_handle, t->regcmd_obj);
         }
         if (t->tasks) {
-            munmap(t->tasks, 4096);
+            munmap(t->tasks, 1024);
             mem_destroy(t->npu_fd, t->tasks_handle, t->tasks_obj);
         }
         npu_close(t->npu_fd);
@@ -551,9 +420,6 @@ void build_transformer(Transformer *t, char* checkpoint_path) {
     t->weight_cache.w1_cache = calloc(n_layers, sizeof(NPUWeightCache));
     t->weight_cache.w2_cache = calloc(n_layers, sizeof(NPUWeightCache));
     t->weight_cache.w3_cache = calloc(n_layers, sizeof(NPUWeightCache));
-    t->weight_cache.w1_split_cache = NULL;
-    t->weight_cache.w2_split_cache = NULL;
-    t->weight_cache.w3_split_cache = NULL;
     
     int cached_count = 0;
     int total_count = 0;
@@ -577,63 +443,19 @@ void build_transformer(Transformer *t, char* checkpoint_path) {
         if (wo) { t->weight_cache.wo_cache[l] = *wo; free(wo); cached_count++; }
         total_count++;
         
-        total_count++;
-        total_count++;
-        total_count++;
-
+        // FFN weights
         NPUWeightCache* w1 = create_weight_cache(t->npu_fd, t->weights.w1 + l*dim*hidden_dim, hidden_dim, dim);
         if (w1) { t->weight_cache.w1_cache[l] = *w1; free(w1); cached_count++; }
-
+        total_count++;
+        
         NPUWeightCache* w2 = create_weight_cache(t->npu_fd, t->weights.w2 + l*hidden_dim*dim, dim, hidden_dim);
         if (w2) { t->weight_cache.w2_cache[l] = *w2; free(w2); cached_count++; }
-
+        total_count++;
+        
         NPUWeightCache* w3 = create_weight_cache(t->npu_fd, t->weights.w3 + l*dim*hidden_dim, hidden_dim, dim);
         if (w3) { t->weight_cache.w3_cache[l] = *w3; free(w3); cached_count++; }
+        total_count++;
     }
-
-#if ENABLE_FFN_SPLIT_NPU
-    t->weight_cache.w1_split_cache = calloc(n_layers, sizeof(*t->weight_cache.w1_split_cache));
-    t->weight_cache.w2_split_cache = calloc(n_layers, sizeof(*t->weight_cache.w2_split_cache));
-    t->weight_cache.w3_split_cache = calloc(n_layers, sizeof(*t->weight_cache.w3_split_cache));
-
-    build_row_split_plan(hidden_dim, &t->weight_cache.w1_split_plan);
-    build_row_split_plan(dim, &t->weight_cache.w2_split_plan);
-    build_row_split_plan(hidden_dim, &t->weight_cache.w3_split_plan);
-
-    for (int l = 0; l < n_layers; l++) {
-        total_count += t->weight_cache.w1_split_plan.part_count.saturating_sub(1);
-        total_count += t->weight_cache.w2_split_plan.part_count.saturating_sub(1);
-        total_count += t->weight_cache.w3_split_plan.part_count.saturating_sub(1);
-    }
-
-    cached_count += cache_split_weight_layers(
-        t->npu_fd,
-        t->weight_cache.w1_split_cache,
-        n_layers,
-        &t->weight_cache.w1_split_plan,
-        t->weights.w1,
-        (size_t)dim * hidden_dim,
-        dim
-    );
-    cached_count += cache_split_weight_layers(
-        t->npu_fd,
-        t->weight_cache.w2_split_cache,
-        n_layers,
-        &t->weight_cache.w2_split_plan,
-        t->weights.w2,
-        (size_t)hidden_dim * dim,
-        hidden_dim
-    );
-    cached_count += cache_split_weight_layers(
-        t->npu_fd,
-        t->weight_cache.w3_split_cache,
-        n_layers,
-        &t->weight_cache.w3_split_plan,
-        t->weights.w3,
-        (size_t)dim * hidden_dim,
-        dim
-    );
-#endif
     
     // Classifier weights
     t->weight_cache.wcls_cache = calloc(1, sizeof(NPUWeightCache));
@@ -651,7 +473,7 @@ void build_transformer(Transformer *t, char* checkpoint_path) {
     t->npu_fallback = 0;
     
     fprintf(stderr, "NPU initialized successfully:\n");
-    fprintf(stderr, "  - Cached %d/%d NPU weight entries (%.1f%%)\n", 
+    fprintf(stderr, "  - Cached %d/%d weight matrices (%.1f%%)\n", 
             cached_count, total_count, 100.0 * cached_count / total_count);
     fprintf(stderr, "  - Buffer pool: %d buffers\n", MAX_BUFFER_POOL_SIZE);
 #endif
@@ -678,24 +500,6 @@ void free_transformer(Transformer* t) {
                     free_weight_cache(t->npu_fd, &t->weight_cache.w2_cache[l]);
                 if (t->weight_cache.w3_cache[l].is_cached)
                     free_weight_cache(t->npu_fd, &t->weight_cache.w3_cache[l]);
-                if (t->weight_cache.w1_split_cache) {
-                    for (int c = 0; c < t->weight_cache.w1_split_plan.part_count; c++) {
-                        if (t->weight_cache.w1_split_cache[l][c].is_cached)
-                            free_weight_cache(t->npu_fd, &t->weight_cache.w1_split_cache[l][c]);
-                    }
-                }
-                if (t->weight_cache.w2_split_cache) {
-                    for (int c = 0; c < t->weight_cache.w2_split_plan.part_count; c++) {
-                        if (t->weight_cache.w2_split_cache[l][c].is_cached)
-                            free_weight_cache(t->npu_fd, &t->weight_cache.w2_split_cache[l][c]);
-                    }
-                }
-                if (t->weight_cache.w3_split_cache) {
-                    for (int c = 0; c < t->weight_cache.w3_split_plan.part_count; c++) {
-                        if (t->weight_cache.w3_split_cache[l][c].is_cached)
-                            free_weight_cache(t->npu_fd, &t->weight_cache.w3_split_cache[l][c]);
-                    }
-                }
             }
 
             // wcls_cache is separately allocated, so handle it specially
@@ -719,9 +523,6 @@ void free_transformer(Transformer* t) {
             free(t->weight_cache.w1_cache);
             free(t->weight_cache.w2_cache);
             free(t->weight_cache.w3_cache);
-            free(t->weight_cache.w1_split_cache);
-            free(t->weight_cache.w2_split_cache);
-            free(t->weight_cache.w3_split_cache);
         }
         
         // Free buffer pool
@@ -729,14 +530,12 @@ void free_transformer(Transformer* t) {
             free_buffer_pool(t);
         }
         
-        for (int c = 0; c < NPU_MAX_CORES; c++) {
-            if (t->regcmd[c] != NULL) {
-                munmap(t->regcmd[c], 1024);
-                mem_destroy(t->npu_fd, t->regcmd_handle[c], t->regcmd_obj[c]);
-            }
+        if (t->regcmd != NULL) {
+            munmap(t->regcmd, 1024);
+            mem_destroy(t->npu_fd, t->regcmd_handle, t->regcmd_obj);
         }
         if (t->tasks != NULL) {
-            munmap(t->tasks, 4096);
+            munmap(t->tasks, 1024);
             mem_destroy(t->npu_fd, t->tasks_handle, t->tasks_obj);
         }
         npu_close(t->npu_fd);
@@ -913,14 +712,14 @@ int matmul_npu_cached(Transformer* t, float* xout, float* x, NPUWeightCache* wei
     params.input_dma = input_dma;
     params.weights_dma = weights_dma;
     params.output_dma = output_dma;
-    params.tasks = (uint64_t *)&t->npu_regs[0];
+    params.tasks = (uint64_t *)&t->npu_regs;
     params.fp32tofp16 = 0;
     
     if (gen_matmul_fp16(&params) != 0) {
         goto cleanup_error;
     }
     
-    memcpy(t->regcmd[0], t->npu_regs[0], sizeof(t->npu_regs[0]));
+    memcpy(t->regcmd, t->npu_regs, sizeof(t->npu_regs));
     
     // Setup task
     t->tasks[0].flags = 0;
@@ -929,11 +728,11 @@ int matmul_npu_cached(Transformer* t, float* xout, float* x, NPUWeightCache* wei
     t->tasks[0].int_mask = 0x300;
     t->tasks[0].int_clear = 0x1ffff;
     t->tasks[0].int_status = 0;
-    t->tasks[0].regcfg_amount = sizeof(t->npu_regs[0])/sizeof(uint64_t)-(RKNPU_PC_DATA_EXTRA_AMOUNT+4);
+    t->tasks[0].regcfg_amount = sizeof(t->npu_regs)/sizeof(uint64_t)-(RKNPU_PC_DATA_EXTRA_AMOUNT+4);
     t->tasks[0].regcfg_offset = 0;
-    t->tasks[0].regcmd_addr = t->regcmd_dma[0];
+    t->tasks[0].regcmd_addr = t->regcmd_dma;
     
-    // Submit to NPU (single core)
+    // Submit to NPU
     struct rknpu_submit submit = {
         .flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG,
         .timeout = 6000,
@@ -945,21 +744,17 @@ int matmul_npu_cached(Transformer* t, float* xout, float* x, NPUWeightCache* wei
         .regcfg_obj_addr = 0,
         .task_base_addr = 0,
         .user_data = 0,
-        .core_mask = 0x1,
+        .core_mask = 1,
         .fence_fd = -1,
         .subcore_task = {
             { .task_start = 0, .task_number = 1 },
-            { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }
+            { 1, 0 }, { 2, 0 }, { 0, 0 }, { 0, 0 }
         },
     };
-
-    maybe_dump_npu_status(t->npu_fd, "single-core before submit", &submit);
     
     if (ioctl(t->npu_fd, DRM_IOCTL_RKNPU_SUBMIT, &submit) < 0) {
         goto cleanup_error;
     }
-
-    maybe_dump_npu_status(t->npu_fd, "single-core after submit", &submit);
     
     // Copy results back
     float *output_data = (float*) output;
@@ -973,8 +768,6 @@ int matmul_npu_cached(Transformer* t, float* xout, float* x, NPUWeightCache* wei
             goto cleanup_error;
         }
     }
-
-    maybe_dump_npu_status(t->npu_fd, "single-core after result readback", &submit);
     
     // Clean up
     if (use_pool) {
@@ -1010,381 +803,6 @@ cleanup_error:
     return -1;
 }
 
-// 3-core parallel QKV matmul: submits Q, K, V to 3 NPU cores simultaneously
-int matmul_npu_3core_qkv(Transformer* t, float* xout_q, float* xout_k, float* xout_v,
-                          float* x, int layer_idx) {
-    if (!t->weight_cache.enabled) { fprintf(stderr, "[3core] cache disabled\n"); return -1; }
-
-    NPUWeightCache* caches[3] = {
-        &t->weight_cache.wq_cache[layer_idx],
-        &t->weight_cache.wk_cache[layer_idx],
-        &t->weight_cache.wv_cache[layer_idx],
-    };
-    float* xouts[3] = { xout_q, xout_k, xout_v };
-    int dims[3];  // M (output dim) for each matmul
-
-    int dim = t->config.dim;
-    int kv_dim = (dim * t->config.n_kv_heads) / t->config.n_heads;
-    dims[0] = dim;      // wq: dim x dim
-    dims[1] = kv_dim;   // wk: kv_dim x dim
-    dims[2] = kv_dim;   // wv: kv_dim x dim
-    int K = dim;        // shared input dimension
-    int N = 16;
-
-    // Validate all 3 caches exist and dimensions are NPU-compatible
-    for (int c = 0; c < 3; c++) {
-        if (!caches[c] || !caches[c]->is_cached) { fprintf(stderr, "[3core] cache[%d] not ready\n", c); return -1; }
-        int d = dims[c];
-        if (d != 1 && (d % 4 != 0 || d > 544)) { fprintf(stderr, "[3core] dim check fail: core=%d d=%d\n", c, d); return -1; }
-    }
-    if (K % 32 != 0 || K > 4096) { fprintf(stderr, "[3core] K check fail: K=%d\n", K); return -1; }
-
-    t->npu_calls += 3;
-
-    // Per-core DMA buffers
-    NPUBuffer *input_bufs[3] = {0}, *weights_bufs[3] = {0}, *output_bufs[3] = {0};
-    void *inputs[3], *weights[3], *outputs[3];
-    uint64_t input_dmas[3], weights_dmas[3], output_dmas[3];
-    int use_pool[3] = {0};
-
-    // Allocate buffers for each core
-    for (int c = 0; c < 3; c++) {
-        int M = dims[c];
-        int K_padded = ((K + 31) / 32) * 32;
-        size_t input_size = M * K * sizeof(_Float16);
-        size_t weights_size = ((K_padded + 31) / 32) * 32 * 16 * sizeof(_Float16);
-        size_t output_size = M * N * sizeof(float);
-
-        input_bufs[c] = get_buffer_from_pool(t, input_size);
-        weights_bufs[c] = get_buffer_from_pool(t, weights_size);
-        output_bufs[c] = get_buffer_from_pool(t, output_size);
-
-        if (input_bufs[c] && weights_bufs[c] && output_bufs[c]) {
-            inputs[c] = input_bufs[c]->data;
-            input_dmas[c] = input_bufs[c]->dma;
-            weights[c] = weights_bufs[c]->data;
-            weights_dmas[c] = weights_bufs[c]->dma;
-            outputs[c] = output_bufs[c]->data;
-            output_dmas[c] = output_bufs[c]->dma;
-            use_pool[c] = 1;
-        } else {
-            // Pool exhausted for this core, fallback to single-core path
-            fprintf(stderr, "[3core] pool exhausted at core=%d input=%p weights=%p output=%p (need %zu %zu %zu)\n",
-                    c, (void*)input_bufs[c], (void*)weights_bufs[c], (void*)output_bufs[c],
-                    input_size, weights_size, output_size);
-            if (input_bufs[c]) release_buffer_to_pool(input_bufs[c]);
-            if (weights_bufs[c]) release_buffer_to_pool(weights_bufs[c]);
-            if (output_bufs[c]) release_buffer_to_pool(output_bufs[c]);
-            // Release previously allocated buffers
-            for (int j = 0; j < c; j++) {
-                if (use_pool[j]) {
-                    release_buffer_to_pool(input_bufs[j]);
-                    release_buffer_to_pool(weights_bufs[j]);
-                    release_buffer_to_pool(output_bufs[j]);
-                }
-            }
-            return -1;  // Caller will fall back to serial single-core
-        }
-    }
-
-    // Fill data and generate register commands for each core
-    for (int c = 0; c < 3; c++) {
-        int M = dims[c];
-        int K_padded = ((K + 31) / 32) * 32;
-        size_t weights_size = ((K_padded + 31) / 32) * 32 * 16 * sizeof(_Float16);
-
-        // Copy cached weight data (feature/input in NPU terms)
-        memcpy(inputs[c], caches[c]->data, caches[c]->size);
-
-        // Convert input vector x to NPU weight layout
-        _Float16 *weights_fp16 = weights[c];
-        for (int n_idx = 1; n_idx <= N; n_idx++) {
-            for (int k = 1; k <= K; k++) {
-                int src_idx = k - 1;
-                int dst_idx = weight_fp16(K, n_idx, k);
-                if (src_idx < K && dst_idx >= 0 && dst_idx < (int)(weights_size / sizeof(_Float16))) {
-                    weights_fp16[dst_idx] = (_Float16)x[src_idx];
-                } else {
-                    goto qkv_cleanup_error;
-                }
-            }
-        }
-
-        // Generate register commands for this core
-        matmul_params_t params;
-        params.m = M;
-        params.k = K;
-        params.n = N;
-        params.input_dma = input_dmas[c];
-        params.weights_dma = weights_dmas[c];
-        params.output_dma = output_dmas[c];
-        params.tasks = (uint64_t *)&t->npu_regs[c];
-        params.fp32tofp16 = 0;
-
-        if (gen_matmul_fp16(&params) != 0) {
-            goto qkv_cleanup_error;
-        }
-
-        // Copy to per-core DMA regcmd buffer
-        memcpy(t->regcmd[c], t->npu_regs[c], sizeof(t->npu_regs[c]));
-
-        // Setup task descriptor for this core
-        t->tasks[c].flags = 0;
-        t->tasks[c].op_idx = 0;
-        t->tasks[c].enable_mask = 0xd;
-        t->tasks[c].int_mask = 0x300;
-        t->tasks[c].int_clear = 0x1ffff;
-        t->tasks[c].int_status = 0;
-        t->tasks[c].regcfg_amount = sizeof(t->npu_regs[0])/sizeof(uint64_t)-(RKNPU_PC_DATA_EXTRA_AMOUNT+4);
-        t->tasks[c].regcfg_offset = 0;
-        t->tasks[c].regcmd_addr = t->regcmd_dma[c];
-    }
-
-    // Submit all 3 tasks to 3 cores in one ioctl
-    struct rknpu_submit submit = {
-        .flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG,
-        .timeout = 6000,
-        .task_start = 0,
-        .task_number = 3,
-        .task_counter = 0,
-        .priority = 0,
-        .task_obj_addr = t->tasks_obj,
-        .regcfg_obj_addr = 0,
-        .task_base_addr = 0,
-        .user_data = 0,
-        .core_mask = 0x7,
-        .fence_fd = -1,
-        .subcore_task = {
-            { .task_start = 0, .task_number = 1 },
-            { .task_start = 1, .task_number = 1 },
-            { .task_start = 2, .task_number = 1 },
-            { 0, 0 }, { 0, 0 }
-        },
-    };
-
-    maybe_dump_npu_status(t->npu_fd, "qkv-3core before submit", &submit);
-
-    if (ioctl(t->npu_fd, DRM_IOCTL_RKNPU_SUBMIT, &submit) < 0) {
-        goto qkv_cleanup_error;
-    }
-
-    maybe_dump_npu_status(t->npu_fd, "qkv-3core after submit", &submit);
-
-    // Copy results back for each core
-    for (int c = 0; c < 3; c++) {
-        int M = dims[c];
-        float *output_data = (float *)outputs[c];
-        for (int m = 1; m <= M; m++) {
-            int dst_idx = m - 1;
-            int src_idx = feature_data(N, M, 1, 4, 1, m, 1);
-            if (dst_idx < dims[c] && src_idx >= 0 && src_idx < M * N) {
-                xouts[c][dst_idx] = output_data[src_idx];
-            } else {
-                goto qkv_cleanup_error;
-            }
-        }
-    }
-
-    maybe_dump_npu_status(t->npu_fd, "qkv-3core after result readback", &submit);
-
-    // Cleanup
-    for (int c = 0; c < 3; c++) {
-        release_buffer_to_pool(input_bufs[c]);
-        release_buffer_to_pool(weights_bufs[c]);
-        release_buffer_to_pool(output_bufs[c]);
-    }
-    t->npu_success += 3;
-    return 0;
-
-qkv_cleanup_error:
-    for (int c = 0; c < 3; c++) {
-        if (use_pool[c]) {
-            if (input_bufs[c]) release_buffer_to_pool(input_bufs[c]);
-            if (weights_bufs[c]) release_buffer_to_pool(weights_bufs[c]);
-            if (output_bufs[c]) release_buffer_to_pool(output_bufs[c]);
-        }
-    }
-    t->npu_fallback += 3;
-    return -1;
-}
-
-/*
- * Run one logical matmul across up to 3 NPU cores by slicing the output rows.
- * Each core executes an independent row chunk and the caller stitches the
- * partial outputs back into one destination vector.
- */
-int matmul_npu_split_cached(Transformer* t, float* xout, float* x,
-                            NPUWeightCache (*split_caches)[NPU_MAX_CORES],
-                            const NPURowSplitPlan* plan,
-                            int layer_idx, int n, int d) {
-    if (!split_caches || !plan || plan->part_count <= 0) {
-        return -1;
-    }
-
-    int covered_rows = 0;
-    for (int c = 0; c < plan->part_count; c++) {
-        covered_rows += plan->row_count[c];
-        if (!split_caches[layer_idx][c].is_cached) {
-            return -1;
-        }
-    }
-    if (covered_rows != d) {
-        return -1;
-    }
-    if (n % 32 != 0 || n > 4096) {
-        return -1;
-    }
-
-    int K = n;
-    int N = NPU_MATMUL_OUTPUT_LANES;
-    int K_padded = ((K + 31) / 32) * 32;
-
-    t->npu_calls += plan->part_count;
-
-    NPUBuffer* input_bufs[NPU_MAX_CORES] = {0};
-    NPUBuffer* weights_bufs[NPU_MAX_CORES] = {0};
-    NPUBuffer* output_bufs[NPU_MAX_CORES] = {0};
-    void* inputs[NPU_MAX_CORES] = {0};
-    void* weights[NPU_MAX_CORES] = {0};
-    void* outputs[NPU_MAX_CORES] = {0};
-    uint64_t input_dmas[NPU_MAX_CORES] = {0};
-    uint64_t weights_dmas[NPU_MAX_CORES] = {0};
-    uint64_t output_dmas[NPU_MAX_CORES] = {0};
-    int use_pool[NPU_MAX_CORES] = {0};
-
-    for (int c = 0; c < plan->part_count; c++) {
-        int M = plan->row_count[c];
-        size_t input_size = split_caches[layer_idx][c].size;
-        size_t weights_size = ((K_padded + 31) / 32) * 32 * N * sizeof(_Float16);
-        size_t output_size = (size_t)M * N * sizeof(float);
-
-        input_bufs[c] = get_buffer_from_pool(t, input_size);
-        weights_bufs[c] = get_buffer_from_pool(t, weights_size);
-        output_bufs[c] = get_buffer_from_pool(t, output_size);
-
-        if (!input_bufs[c] || !weights_bufs[c] || !output_bufs[c]) {
-            for (int j = 0; j <= c; j++) {
-                if (input_bufs[j]) release_buffer_to_pool(input_bufs[j]);
-                if (weights_bufs[j]) release_buffer_to_pool(weights_bufs[j]);
-                if (output_bufs[j]) release_buffer_to_pool(output_bufs[j]);
-            }
-            t->npu_fallback += plan->part_count;
-            return -1;
-        }
-
-        inputs[c] = input_bufs[c]->data;
-        weights[c] = weights_bufs[c]->data;
-        outputs[c] = output_bufs[c]->data;
-        input_dmas[c] = input_bufs[c]->dma;
-        weights_dmas[c] = weights_bufs[c]->dma;
-        output_dmas[c] = output_bufs[c]->dma;
-        use_pool[c] = 1;
-    }
-
-    for (int c = 0; c < plan->part_count; c++) {
-        int M = plan->row_count[c];
-        size_t weights_size = ((K_padded + 31) / 32) * 32 * N * sizeof(_Float16);
-
-        memcpy(inputs[c], split_caches[layer_idx][c].data, split_caches[layer_idx][c].size);
-
-        _Float16* weights_fp16 = weights[c];
-        for (int n_idx = 1; n_idx <= N; n_idx++) {
-            for (int k = 1; k <= K; k++) {
-                int src_idx = k - 1;
-                int dst_idx = weight_fp16(K, n_idx, k);
-                if (src_idx < K && dst_idx >= 0 && dst_idx < (int)(weights_size / sizeof(_Float16))) {
-                    weights_fp16[dst_idx] = (_Float16)x[src_idx];
-                } else {
-                    goto split_cleanup_error;
-                }
-            }
-        }
-
-        matmul_params_t params;
-        params.m = M;
-        params.k = K;
-        params.n = N;
-        params.input_dma = input_dmas[c];
-        params.weights_dma = weights_dmas[c];
-        params.output_dma = output_dmas[c];
-        params.tasks = (uint64_t*)&t->npu_regs[c];
-        params.fp32tofp16 = 0;
-
-        if (gen_matmul_fp16(&params) != 0) {
-            goto split_cleanup_error;
-        }
-
-        memcpy(t->regcmd[c], t->npu_regs[c], sizeof(t->npu_regs[c]));
-
-        t->tasks[c].flags = 0;
-        t->tasks[c].op_idx = 0;
-        t->tasks[c].enable_mask = 0xd;
-        t->tasks[c].int_mask = 0x300;
-        t->tasks[c].int_clear = 0x1ffff;
-        t->tasks[c].int_status = 0;
-        t->tasks[c].regcfg_amount = sizeof(t->npu_regs[0]) / sizeof(uint64_t) - (RKNPU_PC_DATA_EXTRA_AMOUNT + 4);
-        t->tasks[c].regcfg_offset = 0;
-        t->tasks[c].regcmd_addr = t->regcmd_dma[c];
-    }
-
-    struct rknpu_submit submit = {
-        .flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK | RKNPU_JOB_PINGPONG,
-        .timeout = 6000,
-        .task_start = 0,
-        .task_number = (uint32_t)plan->part_count,
-        .task_counter = 0,
-        .priority = 0,
-        .task_obj_addr = t->tasks_obj,
-        .regcfg_obj_addr = 0,
-        .task_base_addr = 0,
-        .user_data = 0,
-        .core_mask = (1u << plan->part_count) - 1u,
-        .fence_fd = -1,
-    };
-    for (int c = 0; c < plan->part_count; c++) {
-        submit.subcore_task[c].task_start = (uint32_t)c;
-        submit.subcore_task[c].task_number = 1;
-    }
-
-    if (ioctl(t->npu_fd, DRM_IOCTL_RKNPU_SUBMIT, &submit) < 0) {
-        goto split_cleanup_error;
-    }
-
-    for (int c = 0; c < plan->part_count; c++) {
-        int M = plan->row_count[c];
-        int row_start = plan->row_start[c];
-        float* output_data = (float*)outputs[c];
-        for (int m = 1; m <= M; m++) {
-            int dst_idx = row_start + (m - 1);
-            int src_idx = feature_data(N, M, 1, 4, 1, m, 1);
-            if (dst_idx < d && src_idx >= 0 && src_idx < M * N) {
-                xout[dst_idx] = output_data[src_idx];
-            } else {
-                goto split_cleanup_error;
-            }
-        }
-    }
-
-    for (int c = 0; c < plan->part_count; c++) {
-        release_buffer_to_pool(input_bufs[c]);
-        release_buffer_to_pool(weights_bufs[c]);
-        release_buffer_to_pool(output_bufs[c]);
-    }
-    t->npu_success += plan->part_count;
-    return 0;
-
-split_cleanup_error:
-    for (int c = 0; c < plan->part_count; c++) {
-        if (use_pool[c]) {
-            if (input_bufs[c]) release_buffer_to_pool(input_bufs[c]);
-            if (weights_bufs[c]) release_buffer_to_pool(weights_bufs[c]);
-            if (output_bufs[c]) release_buffer_to_pool(output_bufs[c]);
-        }
-    }
-    t->npu_fallback += plan->part_count;
-    return -1;
-}
-
 // Wrapper function for matmul with automatic cache lookup
 int matmul_npu_with_cache(Transformer* t, float* xout, float* x, float* w, 
                           int n, int d, int layer_idx, const char* weight_type) {
@@ -1404,37 +822,10 @@ int matmul_npu_with_cache(Transformer* t, float* xout, float* x, float* w,
     } else if (strcmp(weight_type, "wo") == 0) {
         cache = &t->weight_cache.wo_cache[layer_idx];
     } else if (strcmp(weight_type, "w1") == 0) {
-        if (ENABLE_FFN_SPLIT_NPU
-            && t->weight_cache.w1_split_cache
-            && t->weight_cache.w1_split_plan.part_count > 0)
-        {
-            return matmul_npu_split_cached(
-                t, xout, x, t->weight_cache.w1_split_cache,
-                &t->weight_cache.w1_split_plan, layer_idx, n, d
-            );
-        }
         cache = &t->weight_cache.w1_cache[layer_idx];
     } else if (strcmp(weight_type, "w2") == 0) {
-        if (ENABLE_FFN_SPLIT_NPU
-            && t->weight_cache.w2_split_cache
-            && t->weight_cache.w2_split_plan.part_count > 0)
-        {
-            return matmul_npu_split_cached(
-                t, xout, x, t->weight_cache.w2_split_cache,
-                &t->weight_cache.w2_split_plan, layer_idx, n, d
-            );
-        }
         cache = &t->weight_cache.w2_cache[layer_idx];
     } else if (strcmp(weight_type, "w3") == 0) {
-        if (ENABLE_FFN_SPLIT_NPU
-            && t->weight_cache.w3_split_cache
-            && t->weight_cache.w3_split_plan.part_count > 0)
-        {
-            return matmul_npu_split_cached(
-                t, xout, x, t->weight_cache.w3_split_cache,
-                &t->weight_cache.w3_split_plan, layer_idx, n, d
-            );
-        }
         cache = &t->weight_cache.w3_cache[layer_idx];
     } else if (strcmp(weight_type, "wcls") == 0) {
         cache = t->weight_cache.wcls_cache;
@@ -1514,8 +905,10 @@ float* forward(Transformer* transformer, int token, int pos) {
         s->k = s->key_cache + loff + pos * kv_dim;
         s->v = s->value_cache + loff + pos * kv_dim;
 
-        // 3-core parallel QKV (no fallback)
-        matmul_npu_3core_qkv(transformer, s->q, s->k, s->v, s->xb, l);
+        // OPTIMIZATION: qkv matmuls with cached weights
+        matmul_layer(transformer, s->q, s->xb, w->wq + l*dim*dim, dim, dim, l, "wq");
+        matmul_layer(transformer, s->k, s->xb, w->wk + l*dim*kv_dim, dim, kv_dim, l, "wk");
+        matmul_layer(transformer, s->v, s->xb, w->wv + l*dim*kv_dim, dim, kv_dim, l, "wv");
 
         // RoPE relative positional encoding
         for (int i = 0; i < dim; i+=2) {
@@ -2021,192 +1414,6 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
     free(prompt_tokens);
 }
 
-#if USE_NPU
-/* CPU 参考实现：供 snapshot-stress 模式逐轮校验 NPU 输出。 */
-static void matmul_reference(float* xout, const float* x, const float* w, int n, int d) {
-    for (int i = 0; i < d; i++) {
-        float val = 0.0f;
-        for (int j = 0; j < n; j++) {
-            val += w[i * n + j] * x[j];
-        }
-        xout[i] = val;
-    }
-}
-
-/* 允许一定 FP16 误差范围的逐元素校验。 */
-static int validate_vector(
-    const char* name,
-    const float* got,
-    const float* ref,
-    int len,
-    float abs_tol,
-    float rel_tol
-) {
-    for (int i = 0; i < len; i++) {
-        float diff = fabsf(got[i] - ref[i]);
-        float limit = abs_tol + rel_tol * fabsf(ref[i]);
-        if (diff > limit) {
-            fprintf(
-                stderr,
-                "[snapshot-stress] %s mismatch at idx=%d got=%f ref=%f diff=%f limit=%f\n",
-                name,
-                i,
-                got[i],
-                ref[i],
-                diff,
-                limit
-            );
-            return -1;
-        }
-    }
-    return 0;
-}
-
-/* 生成一份稳定、可复现的初始输入。 */
-static void seed_snapshot_input(float* x, int dim) {
-    for (int i = 0; i < dim; i++) {
-        int lane = (i % 17) - 8;
-        x[i] = lane / 16.0f;
-    }
-}
-
-/*
- * 把本轮 q/k/v 输出折叠成下一轮输入。
- *
- * 这样 20 轮测试不是彼此独立的，而是一条相关联的链，
- * 更容易暴露“剩余任务/剩余轮次状态没有正确延续”的问题。
- */
-static void fold_snapshot_outputs(
-    float* next,
-    const float* q,
-    const float* k,
-    const float* v,
-    const float* prev,
-    int dim,
-    int kv_dim
-) {
-    for (int i = 0; i < dim; i++) {
-        float mix = 0.0625f * q[i]
-                  + 0.03125f * k[i % kv_dim]
-                  - 0.015625f * v[(i * 7) % kv_dim]
-                  + 0.125f * prev[i];
-        next[i] = tanhf(mix);
-    }
-}
-
-/*
- * 在现有 llama 可运行路径上做 20 轮相关联的 3 核 QKV 自测。
- *
- * 这个模式不依赖额外 demo，只关心：
- * - 提交是否都成功；
- * - 每一轮结果是否与 CPU 参考一致；
- * - 关闭 dump 打印后，能否作为简洁的板级回归测试使用。
- */
-static int run_snapshot_stress(Transformer* transformer) {
-    const int rounds = 20;
-    const float abs_tol = 0.5f;
-    const float rel_tol = 0.05f;
-
-    if (transformer == NULL || transformer->npu_fd < 0 || !transformer->weight_cache.enabled) {
-        fprintf(stderr, "[snapshot-stress] NPU or cached weights are not ready\n");
-        return -1;
-    }
-
-    int dim = transformer->config.dim;
-    int kv_dim = (dim * transformer->config.n_kv_heads) / transformer->config.n_heads;
-    if (dim <= 0 || kv_dim <= 0 || transformer->config.n_layers <= 0) {
-        fprintf(stderr, "[snapshot-stress] invalid model dimensions\n");
-        return -1;
-    }
-
-    float* input = calloc(dim, sizeof(float));
-    float* next = calloc(dim, sizeof(float));
-    float* out_q = calloc(dim, sizeof(float));
-    float* ref_q = calloc(dim, sizeof(float));
-    float* out_k = calloc(kv_dim, sizeof(float));
-    float* ref_k = calloc(kv_dim, sizeof(float));
-    float* out_v = calloc(kv_dim, sizeof(float));
-    float* ref_v = calloc(kv_dim, sizeof(float));
-    if (!input || !next || !out_q || !ref_q || !out_k || !ref_k || !out_v || !ref_v) {
-        fprintf(stderr, "[snapshot-stress] allocation failed\n");
-        free(input);
-        free(next);
-        free(out_q);
-        free(ref_q);
-        free(out_k);
-        free(ref_k);
-        free(out_v);
-        free(ref_v);
-        return -1;
-    }
-
-    seed_snapshot_input(input, dim);
-
-    int old_dump = g_enable_npu_dump;
-    g_enable_npu_dump = 0;
-
-    for (int round = 0; round < rounds; round++) {
-        int layer = round % transformer->config.n_layers;
-        fprintf(stderr, "[snapshot-stress] round %d/%d\n", round + 1, rounds);
-
-        memset(out_q, 0, dim * sizeof(float));
-        memset(out_k, 0, kv_dim * sizeof(float));
-        memset(out_v, 0, kv_dim * sizeof(float));
-
-        if (matmul_npu_3core_qkv(transformer, out_q, out_k, out_v, input, layer) != 0) {
-            fprintf(stderr, "[snapshot-stress] submit failed at round %d layer %d\n", round + 1, layer);
-            g_enable_npu_dump = old_dump;
-            free(input);
-            free(next);
-            free(out_q);
-            free(ref_q);
-            free(out_k);
-            free(ref_k);
-            free(out_v);
-            free(ref_v);
-            return -1;
-        }
-
-        /* 用 CPU 直接算出同一层 q/k/v 参考值，再与 NPU 输出逐项比较。 */
-        matmul_reference(ref_q, input, transformer->weights.wq + (size_t)layer * dim * dim, dim, dim);
-        matmul_reference(ref_k, input, transformer->weights.wk + (size_t)layer * dim * kv_dim, dim, kv_dim);
-        matmul_reference(ref_v, input, transformer->weights.wv + (size_t)layer * dim * kv_dim, dim, kv_dim);
-
-        if (validate_vector("q", out_q, ref_q, dim, abs_tol, rel_tol) != 0
-            || validate_vector("k", out_k, ref_k, kv_dim, abs_tol, rel_tol) != 0
-            || validate_vector("v", out_v, ref_v, kv_dim, abs_tol, rel_tol) != 0) {
-            fprintf(stderr, "[snapshot-stress] verify failed at round %d layer %d\n", round + 1, layer);
-            g_enable_npu_dump = old_dump;
-            free(input);
-            free(next);
-            free(out_q);
-            free(ref_q);
-            free(out_k);
-            free(ref_k);
-            free(out_v);
-            free(ref_v);
-            return -1;
-        }
-
-        fold_snapshot_outputs(next, out_q, out_k, out_v, input, dim, kv_dim);
-        memcpy(input, next, dim * sizeof(float));
-    }
-
-    g_enable_npu_dump = old_dump;
-    free(input);
-    free(next);
-    free(out_q);
-    free(ref_q);
-    free(out_k);
-    free(ref_k);
-    free(out_v);
-    free(ref_v);
-
-    fprintf(stderr, "[snapshot-stress] pass\n");
-    return 0;
-}
-#endif
-
 // ----------------------------------------------------------------------------
 // CLI
 
@@ -2215,7 +1422,6 @@ static int run_snapshot_stress(Transformer* transformer) {
 void error_usage() {
     fprintf(stderr, "Usage:   run <checkpoint> [options]\n");
     fprintf(stderr, "Example: run model.bin -n 256 -i \"Once upon a time\"\n");
-    fprintf(stderr, "         run model.bin --snapshot-stress\n");
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -t <float>  temperature in [0,inf], default 1.0\n");
     fprintf(stderr, "  -p <float>  p value in top-p (nucleus) sampling in [0,1] default 0.9\n");
@@ -2225,7 +1431,6 @@ void error_usage() {
     fprintf(stderr, "  -z <string> optional path to custom tokenizer\n");
     fprintf(stderr, "  -m <string> mode: generate|chat, default: generate\n");
     fprintf(stderr, "  -y <string> (optional) system prompt in chat mode\n");
-    fprintf(stderr, "  --snapshot-stress  run 20 rounds of chained 3-core QKV matmul self-test\n");
     exit(EXIT_FAILURE);
 }
 
@@ -2239,20 +1444,13 @@ int main(int argc, char *argv[]) {
     unsigned long long rng_seed = 0;
     char *mode = "generate";
     char *system_prompt = NULL;
-    int snapshot_stress = 0;
 
     if (argc >= 2) { checkpoint_path = argv[1]; } else { error_usage(); }
-    for (int i = 2; i < argc;) {
-        /* 特殊长选项单独处理，不占用后续 value 参数位。 */
-        if (strcmp(argv[i], "--snapshot-stress") == 0) {
-            snapshot_stress = 1;
-            i += 1;
-            continue;
-        }
+    for (int i = 2; i < argc; i+=2) {
         if (i + 1 >= argc) { error_usage(); }
         if (argv[i][0] != '-') { error_usage(); }
         if (strlen(argv[i]) != 2) { error_usage(); }
-
+        
         if (argv[i][1] == 't') { temperature = atof(argv[i + 1]); }
         else if (argv[i][1] == 'p') { topp = atof(argv[i + 1]); }
         else if (argv[i][1] == 's') { rng_seed = atoi(argv[i + 1]); }
@@ -2262,7 +1460,6 @@ int main(int argc, char *argv[]) {
         else if (argv[i][1] == 'm') { mode = argv[i + 1]; }
         else if (argv[i][1] == 'y') { system_prompt = argv[i + 1]; }
         else { error_usage(); }
-        i += 2;
     }
 
     if (rng_seed <= 0) rng_seed = (unsigned int)time(NULL);
@@ -2273,15 +1470,6 @@ int main(int argc, char *argv[]) {
     Transformer transformer;
     build_transformer(&transformer, checkpoint_path);
     if (steps == 0 || steps > transformer.config.seq_len) steps = transformer.config.seq_len;
-
-#if USE_NPU
-    /* 进入专用 NPU 自测模式时，不再继续 tokenizer / sampler / 对话主流程。 */
-    if (snapshot_stress) {
-        int ret = run_snapshot_stress(&transformer);
-        free_transformer(&transformer);
-        return ret == 0 ? 0 : 1;
-    }
-#endif
 
     Tokenizer tokenizer;
     build_tokenizer(&tokenizer, tokenizer_path, transformer.config.vocab_size);

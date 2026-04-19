@@ -44,8 +44,25 @@ target_link_libraries(${PROJECT_NAME}
     dl
 )
 
+add_executable(${PROJECT_NAME}_3thread_core_bind
+    main_3thread_core_bind.cc
+    postprocess.cc
+    ${rknpu_yolov8_file}
+)
+
+target_link_libraries(${PROJECT_NAME}_3thread_core_bind
+    imageutils
+    fileutils
+    imagedrawing
+    ${LIBRKNNRT}
+    dl
+)
+
 if (CMAKE_SYSTEM_NAME STREQUAL "Android")
     target_link_libraries(${PROJECT_NAME}
+    log
+)
+    target_link_libraries(${PROJECT_NAME}_3thread_core_bind
     log
 )
 endif()
@@ -55,9 +72,14 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(THREADS_PREFER_PTHREAD_FLAG ON)
     find_package(Threads REQUIRED)
     target_link_libraries(${PROJECT_NAME} Threads::Threads)
+    target_link_libraries(${PROJECT_NAME}_3thread_core_bind Threads::Threads)
 endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${LIBRKNNRT_INCLUDES}
+)
+target_include_directories(${PROJECT_NAME}_3thread_core_bind PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${LIBRKNNRT_INCLUDES}
 )
@@ -102,7 +124,11 @@ if (NOT (TARGET_SOC STREQUAL "rv1106" OR TARGET_SOC STREQUAL "rv1103" OR TARGET_
 endif()
 
 install(TARGETS ${PROJECT_NAME} DESTINATION .)
+install(TARGETS ${PROJECT_NAME}_3thread_core_bind DESTINATION .)
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../model/bus.jpg DESTINATION model)
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../model/coco_80_labels_list.txt DESTINATION model)
 file(GLOB RKNN_FILES "${CMAKE_CURRENT_SOURCE_DIR}/../model/*.rknn")
 install(FILES ${RKNN_FILES} DESTINATION model)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../model/wait_process_0 DESTINATION model)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../model/wait_process_1 DESTINATION model)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../model/wait_process_2 DESTINATION model)

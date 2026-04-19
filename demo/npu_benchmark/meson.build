@@ -2,6 +2,7 @@ project('npu_benchmark', 'c', version: '1.0.0')
 
 incdir = include_directories('include')
 lib_src = ['src/npu_interface.c','src/npu_matmul.c']
+thread_dep = dependency('threads')
 # lib = library('rk3588-npu',lib_src, include_directories : incdir)
 lib = static_library('rk3588-npu', lib_src, include_directories : incdir)
 
@@ -50,6 +51,7 @@ core_scaling_benchmark = executable(
     'tests/core_scaling_benchmark.c',
     include_directories : incdir,
     link_with : lib,
+    dependencies : thread_dep,
     link_args : '-lm'
 )
 
