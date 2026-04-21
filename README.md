@@ -8,18 +8,8 @@
 
 基于 [StarryOS NPU 版本](https://atomgit.com/aios-porting/3906cf9f2ccbf898bd3512d5862ef92e) 继续开发的分支，专注于 RK3588 NPU 驱动开发，目标是让 NPU 驱动支持**异步执行**和**多核并发**。
 
-## 项目概览
 
-StarryOS-Pulsar 在 StarryOS 的基础上，针对瑞芯微 RK3588 SoC 的 NPU（Neural Processing Unit）进行深度驱动开发，主要工作包括：
-
-- NPU 寄存器访问层（基于 svd2rust 类型安全抽象）
-- 电源域管理（rockchip-pm）与时钟树控制（rk3588-clk）
-- NPU 三核心 MMIO 映射与初始化
-- DRM/ioctl 接口层（开发中）
-- GEM 内存管理与 DMA 传输（开发中）
-- 任务提交与中断处理（开发中）
-
-## 环境要求
+## 运行环境要求
 
 - Rust nightly 工具链
 - 目标板：**OrangePi 5 Plus**（RK3588）
