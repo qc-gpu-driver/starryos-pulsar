@@ -129,6 +129,46 @@ cd /demo
 ./llama.sh
 ```
 
+#### Step 13：Benchmark 运行测试
+
+先在主机侧编译 `core_scaling_benchmark`：
+
+```bash
+cd demo/npu_benchmark
+meson setup build --cross-file cross-file.txt
+meson compile -C build core_scaling_benchmark
+```
+
+编译完成后，可执行文件位于：
+
+```bash
+demo/npu_benchmark/build/core_scaling_benchmark
+```
+
+将该文件上传到开发板（例如上传到 `/test` 目录），然后在开发板上运行：
+
+```bash
+cd /test
+chmod +x core_scaling_benchmark
+./core_scaling_benchmark
+```
+
+可选：使用参数缩小测试范围或调整轮数：
+
+```bash
+./core_scaling_benchmark --help
+./core_scaling_benchmark --scenario mid_balanced --rounds 12 --warmup 2
+./core_scaling_benchmark --task-cap 24 --no-unique
+```
+
+运行成功时，末尾会输出：
+
+```text
+benchmark complete status=0
+```
+
+
+
 运行 NPU 推理测试。`/demo` 目录下还包含其他测例（如 YOLO 目标检测等），可根据需要运行。
 
 ![运行推理测试](docs/mdimage/step11.png)
