@@ -229,7 +229,7 @@ submit 的生命周期状态（ready/running/complete）不是单独维护的枚
 
 
 ## 相关仓库
-### 驱动主残酷
+### 驱动主仓库
 [RKNPU](https://github.com/qc-gpu-driver/RKNPU)
 
 ### StarryOS与驱动的桥接层
