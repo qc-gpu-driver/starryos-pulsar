@@ -18,6 +18,7 @@
 - [项目月报](./develop_log/monthly_index.md)
     - [2月技术报告-周雨](./develop_log/2月技术报告-周雨.md)
     - [3月技术报告-周雨](./develop_log/3月技术报告-周雨.md)
+    - [4月技术报告-周雨](./develop_log/4月技术报告-周雨.md)
 - [项目文档](./documents/docs.md)
     - [rknn手册](./documents/rknn-manual.md)
         - [rknn硬件手册](./documents/rknn-hardware.md)
